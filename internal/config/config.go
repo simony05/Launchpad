@@ -16,17 +16,22 @@ const (
 
 // Config contains runtime configuration for the control plane.
 type Config struct {
-	Host     string
-	Port     int
-	LogLevel slog.Level
+	Host        string
+	Port        int
+	LogLevel    slog.Level
+	DatabaseURL string
 }
 
 // Load reads control-plane configuration from environment variables.
 func Load() (Config, error) {
 	cfg := Config{
-		Host:     envOrDefault("MINICLOUD_HOST", defaultHost),
-		Port:     defaultPort,
-		LogLevel: defaultLogLevel,
+		Host:        envOrDefault("MINICLOUD_HOST", defaultHost),
+		Port:        defaultPort,
+		LogLevel:    defaultLogLevel,
+		DatabaseURL: os.Getenv("MINICLOUD_DATABASE_URL"),
+	}
+	if cfg.DatabaseURL == "" {
+		return Config{}, fmt.Errorf("MINICLOUD_DATABASE_URL must be set")
 	}
 
 	if rawPort := os.Getenv("MINICLOUD_PORT"); rawPort != "" {

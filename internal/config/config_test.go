@@ -6,6 +6,7 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
 	t.Setenv("MINICLOUD_HOST", "")
 	t.Setenv("MINICLOUD_PORT", "")
 	t.Setenv("MINICLOUD_LOG_LEVEL", "")
@@ -21,6 +22,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidPort(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
 	t.Setenv("MINICLOUD_PORT", "not-a-port")
 
 	if _, err := Load(); err == nil {
@@ -29,6 +31,7 @@ func TestLoadRejectsInvalidPort(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidLogLevel(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
 	t.Setenv("MINICLOUD_LOG_LEVEL", "verbose")
 
 	if _, err := Load(); err == nil {
@@ -37,6 +40,7 @@ func TestLoadRejectsInvalidLogLevel(t *testing.T) {
 }
 
 func TestLoadSetsLogLevel(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
 	t.Setenv("MINICLOUD_LOG_LEVEL", "debug")
 
 	cfg, err := Load()
@@ -45,5 +49,13 @@ func TestLoadSetsLogLevel(t *testing.T) {
 	}
 	if cfg.LogLevel != slog.LevelDebug {
 		t.Fatalf("LogLevel = %v, want %v", cfg.LogLevel, slog.LevelDebug)
+	}
+}
+
+func TestLoadRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error")
 	}
 }

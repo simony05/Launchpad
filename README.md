@@ -13,6 +13,8 @@ workers, or route public prototype traffic.
 .
 ├── cmd/control-plane/       # Process entrypoint and shutdown lifecycle
 ├── internal/config/         # Environment-derived, validated application config
+├── internal/database/       # PostgreSQL connection and embedded SQL migrations
+├── internal/deployments/    # Deployment domain model and persistence repository
 ├── internal/httpserver/     # HTTP routes and server construction
 ├── Dockerfile               # Container image for the control-plane binary
 └── go.mod                   # Go module definition
@@ -29,20 +31,67 @@ details as public Go APIs.
 | `MINICLOUD_HOST` | `0.0.0.0` | Address on which the server listens. |
 | `MINICLOUD_PORT` | `8080` | TCP port on which the server listens. |
 | `MINICLOUD_LOG_LEVEL` | `info` | Structured log level: `debug`, `info`, `warn`, or `error`. |
+| `MINICLOUD_DATABASE_URL` | none | Required PostgreSQL connection URL. |
+
+## Deployment metadata API
+
+`POST /deployments` creates a metadata record only. It does not build, start,
+or otherwise execute application code.
+
+```json
+{
+  "name": "example-api",
+  "runtime": "python"
+}
+```
+
+The response is `201 Created` and has a `PENDING` status. Read metadata with
+`GET /deployments/{id}` or list it with `GET /deployments`.
+
+The initial migration creates a `deployments` table with UUID identifiers,
+database-managed timestamps, and a PostgreSQL `deployment_status` enum. The
+runtime is currently restricted to `python`; nullable container, port, and
+public-identifier fields are reserved for future worker and routing milestones.
+
+## Development database
+
+Create an isolated Docker network and a persistent PostgreSQL container:
+
+```sh
+docker network create minicloud
+docker volume create minicloud-postgres-data
+docker run -d --name minicloud-postgres --restart unless-stopped \
+  --network minicloud \
+  -e POSTGRES_DB=minicloud \
+  -e POSTGRES_USER=minicloud \
+  -e POSTGRES_PASSWORD=replace-this-development-password \
+  -v minicloud-postgres-data:/var/lib/postgresql/data \
+  postgres:17
+```
+
+The database has no published host port. A control-plane container on the same
+Docker network reaches it using the `minicloud-postgres` hostname.
 
 ## Local development
 
 Go 1.24 or later is required.
 
 ```sh
-go test ./...
-go run ./cmd/control-plane
+docker run --rm --name minicloud-postgres -p 5432:5432 \
+  -e POSTGRES_DB=minicloud \
+  -e POSTGRES_USER=minicloud \
+  -e POSTGRES_PASSWORD=replace-this-development-password \
+  postgres:17
 ```
 
-In another terminal, test the service:
+In another terminal, run the service and test it:
 
 ```sh
+MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@localhost:5432/minicloud?sslmode=disable' go run ./cmd/control-plane
 curl -i http://localhost:8080/health
+curl -i -X POST http://localhost:8080/deployments \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"example-api","runtime":"python"}'
 ```
 
 Expected response:
@@ -57,7 +106,7 @@ Content-Type: application/json
 To set configuration explicitly:
 
 ```sh
-MINICLOUD_HOST=127.0.0.1 MINICLOUD_PORT=8081 MINICLOUD_LOG_LEVEL=debug go run ./cmd/control-plane
+MINICLOUD_HOST=127.0.0.1 MINICLOUD_PORT=8081 MINICLOUD_LOG_LEVEL=debug MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@localhost:5432/minicloud?sslmode=disable' go run ./cmd/control-plane
 curl -i http://localhost:8081/health
 ```
 
@@ -67,7 +116,9 @@ Build and run the control plane:
 
 ```sh
 docker build -t minicloud-control-plane .
-docker run --rm -p 8080:8080 minicloud-control-plane
+docker run --rm --network minicloud -p 8080:8080 \
+  -e MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@minicloud-postgres:5432/minicloud?sslmode=disable' \
+  minicloud-control-plane
 ```
 
 Then use the same `curl` command above. Pass environment configuration with

@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"github.com/simon/launchpad/internal/config"
+	"github.com/simon/launchpad/internal/database"
+	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/httpserver"
 )
 
 const shutdownTimeout = 10 * time.Second
+const startupTimeout = 10 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -31,7 +34,21 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	server := httpserver.New(cfg.Address(), logger)
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancelStartup()
+	pool, err := database.Open(startupCtx, cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("connect to PostgreSQL", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+	if err := database.Migrate(startupCtx, pool); err != nil {
+		logger.Error("migrate PostgreSQL", "error", err)
+		os.Exit(1)
+	}
+
+	deploymentRepository := deployments.NewPostgresRepository(pool)
+	server := httpserver.New(cfg.Address(), logger, deploymentRepository)
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())
