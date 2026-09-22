@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,20 +12,23 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/simon/launchpad/internal/deployments"
+	"github.com/simon/launchpad/internal/workspace"
 )
 
 const (
-	readHeaderTimeout = 5 * time.Second
-	readTimeout       = 15 * time.Second
-	writeTimeout      = 15 * time.Second
-	idleTimeout       = 60 * time.Second
+	readHeaderTimeout  = 5 * time.Second
+	readTimeout        = 15 * time.Second
+	writeTimeout       = 15 * time.Second
+	idleTimeout        = 60 * time.Second
+	maxRequestBodySize = 2 << 20
+	cleanupTimeout     = 5 * time.Second
 )
 
 // New creates the MiniCloud control-plane HTTP server.
-func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository) *http.Server {
+func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	deploymentHandler := deploymentHandler{repository: deploymentRepository}
+	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
@@ -46,12 +50,14 @@ func health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type deploymentHandler struct {
-	repository deployments.Repository
+	repository  deployments.Repository
+	sourceStore workspace.Store
 }
 
 type createDeploymentRequest struct {
-	Name    string `json:"name"`
-	Runtime string `json:"runtime"`
+	Name    string          `json:"name"`
+	Runtime string          `json:"runtime"`
+	Files   workspace.Files `json:"files"`
 }
 
 func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +73,16 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create deployment")
+		return
+	}
+	if err := h.sourceStore.Store(r.Context(), deployment.ID, request.Files); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		if cleanupErr := h.repository.Delete(cleanupCtx, deployment.ID); cleanupErr != nil {
+			writeError(w, http.StatusInternalServerError, "create deployment")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store deployment source")
 		return
 	}
 
@@ -104,12 +120,12 @@ func (h deploymentHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeCreateDeploymentRequest(w http.ResponseWriter, r *http.Request) (createDeploymentRequest, error) {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	decoder.DisallowUnknownFields()
 
 	var request createDeploymentRequest
 	if err := decoder.Decode(&request); err != nil {
-		return createDeploymentRequest{}, errors.New("request body must be valid JSON with name and runtime")
+		return createDeploymentRequest{}, errors.New("request body must be valid JSON with name, runtime, and files")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return createDeploymentRequest{}, errors.New("request body must contain one JSON object")
@@ -122,6 +138,9 @@ func decodeCreateDeploymentRequest(w http.ResponseWriter, r *http.Request) (crea
 	}
 	if request.Runtime != "python" {
 		return createDeploymentRequest{}, errors.New("runtime must be python")
+	}
+	if err := workspace.ValidateFiles(request.Files); err != nil {
+		return createDeploymentRequest{}, err
 	}
 
 	return request, nil

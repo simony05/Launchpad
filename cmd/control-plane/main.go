@@ -14,6 +14,7 @@ import (
 	"github.com/simon/launchpad/internal/database"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/httpserver"
+	"github.com/simon/launchpad/internal/workspace"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -48,7 +49,8 @@ func main() {
 	}
 
 	deploymentRepository := deployments.NewPostgresRepository(pool)
-	server := httpserver.New(cfg.Address(), logger, deploymentRepository)
+	sourceStore := workspace.NewLocalStore(cfg.WorkspaceRoot)
+	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore)
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())

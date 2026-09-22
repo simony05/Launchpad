@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -16,22 +17,30 @@ const (
 
 // Config contains runtime configuration for the control plane.
 type Config struct {
-	Host        string
-	Port        int
-	LogLevel    slog.Level
-	DatabaseURL string
+	Host          string
+	Port          int
+	LogLevel      slog.Level
+	DatabaseURL   string
+	WorkspaceRoot string
 }
 
 // Load reads control-plane configuration from environment variables.
 func Load() (Config, error) {
 	cfg := Config{
-		Host:        envOrDefault("MINICLOUD_HOST", defaultHost),
-		Port:        defaultPort,
-		LogLevel:    defaultLogLevel,
-		DatabaseURL: os.Getenv("MINICLOUD_DATABASE_URL"),
+		Host:          envOrDefault("MINICLOUD_HOST", defaultHost),
+		Port:          defaultPort,
+		LogLevel:      defaultLogLevel,
+		DatabaseURL:   os.Getenv("MINICLOUD_DATABASE_URL"),
+		WorkspaceRoot: os.Getenv("MINICLOUD_WORKSPACE_ROOT"),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("MINICLOUD_DATABASE_URL must be set")
+	}
+	if cfg.WorkspaceRoot == "" {
+		return Config{}, fmt.Errorf("MINICLOUD_WORKSPACE_ROOT must be set")
+	}
+	if !filepath.IsAbs(cfg.WorkspaceRoot) {
+		return Config{}, fmt.Errorf("MINICLOUD_WORKSPACE_ROOT must be an absolute path")
 	}
 
 	if rawPort := os.Getenv("MINICLOUD_PORT"); rawPort != "" {

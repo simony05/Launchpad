@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/simon/launchpad/internal/deployments"
+	"github.com/simon/launchpad/internal/workspace"
 )
 
 func TestHealth(t *testing.T) {
@@ -45,7 +46,7 @@ func TestHealthRejectsOtherMethods(t *testing.T) {
 
 func TestCreateDeployment(t *testing.T) {
 	server := newTestServer()
-	request := httptest.NewRequest(http.MethodPost, "/deployments", strings.NewReader(`{"name":"demo-api","runtime":"python"}`))
+	request := httptest.NewRequest(http.MethodPost, "/deployments", strings.NewReader(`{"name":"demo-api","runtime":"python","files":{"app.py":"from fastapi import FastAPI","requirements.txt":"fastapi"}}`))
 	response := httptest.NewRecorder()
 
 	server.Handler.ServeHTTP(response, request)
@@ -55,6 +56,18 @@ func TestCreateDeployment(t *testing.T) {
 	}
 	if body := response.Body.String(); !strings.Contains(body, `"status":"PENDING"`) {
 		t.Fatalf("body = %q, want PENDING deployment", body)
+	}
+}
+
+func TestCreateDeploymentRejectsUnexpectedFilename(t *testing.T) {
+	server := newTestServer()
+	request := httptest.NewRequest(http.MethodPost, "/deployments", strings.NewReader(`{"name":"demo-api","runtime":"python","files":{"app.py":"app = object()","requirements.txt":"","../secret":"no"}}`))
+	response := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 }
 
@@ -83,7 +96,7 @@ func TestListDeployments(t *testing.T) {
 }
 
 func newTestServer() *http.Server {
-	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), &memoryRepository{})
+	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), &memoryRepository{}, &memorySourceStore{})
 }
 
 type memoryRepository struct {
@@ -119,4 +132,27 @@ func (r *memoryRepository) List(_ context.Context) ([]deployments.Deployment, er
 	return r.items, nil
 }
 
+func (r *memoryRepository) Delete(_ context.Context, id string) error {
+	for index, deployment := range r.items {
+		if deployment.ID == id {
+			r.items = append(r.items[:index], r.items[index+1:]...)
+			return nil
+		}
+	}
+	return deployments.ErrNotFound
+}
+
+type memorySourceStore struct {
+	files map[string]workspace.Files
+}
+
+func (s *memorySourceStore) Store(_ context.Context, deploymentID string, files workspace.Files) error {
+	if s.files == nil {
+		s.files = make(map[string]workspace.Files)
+	}
+	s.files[deploymentID] = files
+	return nil
+}
+
 var _ deployments.Repository = (*memoryRepository)(nil)
+var _ workspace.Store = (*memorySourceStore)(nil)

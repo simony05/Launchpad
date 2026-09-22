@@ -70,6 +70,17 @@ func (r *PostgresRepository) List(ctx context.Context) ([]Deployment, error) {
 	return deployments, nil
 }
 
+func (r *PostgresRepository) Delete(ctx context.Context, id string) error {
+	commandTag, err := r.pool.Exec(ctx, "DELETE FROM deployments WHERE id = $1", id)
+	if err != nil {
+		return fmt.Errorf("delete deployment: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 type rowScanner interface {
 	Scan(...any) error
 }
