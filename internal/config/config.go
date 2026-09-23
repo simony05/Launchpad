@@ -3,9 +3,11 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 )
 
@@ -14,6 +16,9 @@ const (
 	defaultPort         = 8080
 	defaultLogLevel     = slog.LevelInfo
 	defaultBuildTimeout = 5 * 60
+	defaultStartTimeout = 30
+	defaultAppCPUs      = "0.5"
+	defaultAppMemory    = "256m"
 )
 
 // Config contains runtime configuration for the control plane.
@@ -24,6 +29,9 @@ type Config struct {
 	DatabaseURL         string
 	WorkspaceRoot       string
 	BuildTimeoutSeconds int
+	StartTimeoutSeconds int
+	AppCPUs             string
+	AppMemory           string
 }
 
 // Load reads control-plane configuration from environment variables.
@@ -35,6 +43,9 @@ func Load() (Config, error) {
 		DatabaseURL:         os.Getenv("MINICLOUD_DATABASE_URL"),
 		WorkspaceRoot:       os.Getenv("MINICLOUD_WORKSPACE_ROOT"),
 		BuildTimeoutSeconds: defaultBuildTimeout,
+		StartTimeoutSeconds: defaultStartTimeout,
+		AppCPUs:             envOrDefault("MINICLOUD_APP_CPUS", defaultAppCPUs),
+		AppMemory:           envOrDefault("MINICLOUD_APP_MEMORY", defaultAppMemory),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("MINICLOUD_DATABASE_URL must be set")
@@ -51,6 +62,19 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("MINICLOUD_BUILD_TIMEOUT_SECONDS must be an integer between 30 and 1800")
 		}
 		cfg.BuildTimeoutSeconds = timeout
+	}
+	if rawTimeout := os.Getenv("MINICLOUD_START_TIMEOUT_SECONDS"); rawTimeout != "" {
+		timeout, err := strconv.Atoi(rawTimeout)
+		if err != nil || timeout < 5 || timeout > 300 {
+			return Config{}, fmt.Errorf("MINICLOUD_START_TIMEOUT_SECONDS must be an integer between 5 and 300")
+		}
+		cfg.StartTimeoutSeconds = timeout
+	}
+	if cpus, err := strconv.ParseFloat(cfg.AppCPUs, 64); err != nil || math.IsNaN(cpus) || math.IsInf(cpus, 0) || cpus < 0.1 || cpus > 64 {
+		return Config{}, fmt.Errorf("MINICLOUD_APP_CPUS must be a number between 0.1 and 64")
+	}
+	if !memoryPattern.MatchString(cfg.AppMemory) {
+		return Config{}, fmt.Errorf("MINICLOUD_APP_MEMORY must be a whole number followed by m or g")
 	}
 
 	if rawPort := os.Getenv("MINICLOUD_PORT"); rawPort != "" {
@@ -71,6 +95,8 @@ func Load() (Config, error) {
 
 	return cfg, nil
 }
+
+var memoryPattern = regexp.MustCompile(`^[1-9][0-9]*[mMgG]$`)
 
 var logLevels = map[string]slog.Level{
 	"debug": slog.LevelDebug,

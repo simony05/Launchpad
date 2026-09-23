@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/simon/launchpad/internal/build"
+	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/workspace"
 )
@@ -26,20 +27,21 @@ const (
 )
 
 // New creates the MiniCloud control-plane HTTP server.
-func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, buildTimeout time.Duration) *http.Server {
+func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, containerManager containers.Manager, containerLimits containers.Limits, buildTimeout, startTimeout time.Duration) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder}
+	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder, containerManager: containerManager, containerLimits: containerLimits}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
+	mux.HandleFunc("DELETE /deployments/{id}", deploymentHandler.delete)
 
 	return &http.Server{
 		Addr:              address,
 		Handler:           requestLogger(logger, mux),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
-		WriteTimeout:      buildTimeout + buildResponseGrace,
+		WriteTimeout:      buildTimeout + startTimeout + buildResponseGrace,
 		IdleTimeout:       idleTimeout,
 	}
 }
@@ -51,9 +53,11 @@ func health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type deploymentHandler struct {
-	repository  deployments.Repository
-	sourceStore workspace.Store
-	builder     build.Builder
+	repository       deployments.Repository
+	sourceStore      workspace.Store
+	builder          build.Builder
+	containerManager containers.Manager
+	containerLimits  containers.Limits
 }
 
 type createDeploymentRequest struct {
@@ -110,6 +114,34 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "record deployment build")
 		return
 	}
+	deployment, err = h.repository.MarkStarting(r.Context(), deployment.ID)
+	if err != nil {
+		writeRepositoryError(w, err, "start deployment container")
+		return
+	}
+	if deployment.ImageName == nil {
+		writeError(w, http.StatusInternalServerError, "deployment image is missing")
+		return
+	}
+	container, startErr := h.containerManager.Start(r.Context(), deployment.ID, *deployment.ImageName, deployment.Version, h.containerLimits)
+	if startErr != nil {
+		deployment, err = h.failStart(deployment.ID, startErr.Error())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "record deployment startup failure")
+			return
+		}
+		writeJSON(w, http.StatusCreated, deployment)
+		return
+	}
+	deployment, err = h.repository.CompleteStart(r.Context(), deployment.ID, container.ID, container.InternalPort, container.HostPort)
+	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		_ = h.containerManager.Remove(cleanupCtx, container.ID)
+		_, _ = h.repository.FailStart(cleanupCtx, deployment.ID, "container started but MiniCloud could not record its startup")
+		writeRepositoryError(w, err, "record deployment startup")
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, deployment)
 }
@@ -118,6 +150,12 @@ func (h deploymentHandler) failBuild(id, buildLog, buildError string) (deploymen
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	return h.repository.FailBuild(ctx, id, buildLog, buildError)
+}
+
+func (h deploymentHandler) failStart(id, startError string) (deployments.Deployment, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	return h.repository.FailStart(ctx, id, startError)
 }
 
 func (h deploymentHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +175,37 @@ func (h deploymentHandler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, deployment)
+}
+
+func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, http.StatusBadRequest, "deployment id must be a UUID")
+		return
+	}
+
+	deployment, err := h.repository.Get(r.Context(), id)
+	if errors.Is(err, deployments.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "deployment not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get deployment")
+		return
+	}
+	if deployment.ContainerID != nil {
+		if err := h.containerManager.Remove(r.Context(), *deployment.ContainerID); err != nil {
+			writeError(w, http.StatusInternalServerError, "stop deployment container")
+			return
+		}
+	}
+
+	deployment, err = h.repository.MarkStopped(r.Context(), deployment.ID)
+	if err != nil {
+		writeRepositoryError(w, err, "stop deployment")
+		return
+	}
 	writeJSON(w, http.StatusOK, deployment)
 }
 
@@ -187,6 +256,14 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, struct {
 		Error string `json:"error"`
 	}{Error: message})
+}
+
+func writeRepositoryError(w http.ResponseWriter, err error, message string) {
+	if errors.Is(err, deployments.ErrInvalidState) {
+		writeError(w, http.StatusConflict, "deployment is busy")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, message)
 }
 
 func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {

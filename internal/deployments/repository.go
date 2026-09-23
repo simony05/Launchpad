@@ -6,6 +6,7 @@ import (
 )
 
 var ErrNotFound = errors.New("deployment not found")
+var ErrInvalidState = errors.New("deployment is not in a valid state for this operation")
 
 // Repository provides persistence for deployment metadata.
 type Repository interface {
@@ -16,4 +17,8 @@ type Repository interface {
 	MarkBuilding(context.Context, string) (Deployment, error)
 	CompleteBuild(context.Context, string, string, string) (Deployment, error)
 	FailBuild(context.Context, string, string, string) (Deployment, error)
+	MarkStarting(context.Context, string) (Deployment, error)
+	CompleteStart(context.Context, string, string, int, int) (Deployment, error)
+	FailStart(context.Context, string, string) (Deployment, error)
+	MarkStopped(context.Context, string) (Deployment, error)
 }

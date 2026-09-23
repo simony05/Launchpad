@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/simon/launchpad/internal/build"
+	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/workspace"
 )
@@ -56,8 +57,8 @@ func TestCreateDeployment(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusCreated)
 	}
-	if body := response.Body.String(); !strings.Contains(body, `"status":"READY_TO_START"`) {
-		t.Fatalf("body = %q, want built deployment", body)
+	if body := response.Body.String(); !strings.Contains(body, `"status":"RUNNING"`) || !strings.Contains(body, `"host_port":32781`) {
+		t.Fatalf("body = %q, want running deployment", body)
 	}
 }
 
@@ -85,6 +86,27 @@ func TestCreateDeploymentRecordsBuildFailure(t *testing.T) {
 	}
 	if body := response.Body.String(); !strings.Contains(body, `"status":"FAILED"`) || !strings.Contains(body, `"build_error":"docker build failed"`) {
 		t.Fatalf("body = %q, want persisted build failure", body)
+	}
+}
+
+func TestDeleteDeploymentStopsContainer(t *testing.T) {
+	repository := &memoryRepository{items: []deployments.Deployment{{
+		ID:          "8bb34af2-396c-4b37-8905-1b93c6677a1d",
+		Status:      deployments.StatusRunning,
+		ContainerID: stringPointer("ab12cd34ef56"),
+	}}}
+	manager := &memoryContainerManager{}
+	server := New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, successfulBuilder{}, manager, containers.Limits{CPUs: "0.5", Memory: "256m"}, time.Minute, time.Second)
+	request := httptest.NewRequest(http.MethodDelete, "/deployments/8bb34af2-396c-4b37-8905-1b93c6677a1d", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"STOPPED"`) {
+		t.Fatalf("response = (%d, %q), want stopped deployment", response.Code, response.Body.String())
+	}
+	if manager.removedID != "ab12cd34ef56" {
+		t.Fatalf("removed ID = %q", manager.removedID)
 	}
 }
 
@@ -117,7 +139,7 @@ func newTestServer() *http.Server {
 }
 
 func newTestServerWithBuilder(builder build.Builder) *http.Server {
-	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), &memoryRepository{}, &memorySourceStore{}, builder, time.Minute)
+	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), &memoryRepository{}, &memorySourceStore{}, builder, &memoryContainerManager{}, containers.Limits{CPUs: "0.5", Memory: "256m"}, time.Minute, time.Second)
 }
 
 type memoryRepository struct {
@@ -201,6 +223,57 @@ func (r *memoryRepository) FailBuild(_ context.Context, id, buildLog, buildError
 	return deployments.Deployment{}, deployments.ErrNotFound
 }
 
+func (r *memoryRepository) MarkStarting(_ context.Context, id string) (deployments.Deployment, error) {
+	for index, deployment := range r.items {
+		if deployment.ID == id && deployment.Status == deployments.StatusReadyToStart {
+			deployment.Status = deployments.StatusStarting
+			r.items[index] = deployment
+			return deployment, nil
+		}
+	}
+	return deployments.Deployment{}, deployments.ErrInvalidState
+}
+
+func (r *memoryRepository) CompleteStart(_ context.Context, id, containerID string, internalPort, hostPort int) (deployments.Deployment, error) {
+	for index, deployment := range r.items {
+		if deployment.ID == id && deployment.Status == deployments.StatusStarting {
+			deployment.Status = deployments.StatusRunning
+			deployment.ContainerID = &containerID
+			deployment.InternalPort = &internalPort
+			deployment.HostPort = &hostPort
+			r.items[index] = deployment
+			return deployment, nil
+		}
+	}
+	return deployments.Deployment{}, deployments.ErrInvalidState
+}
+
+func (r *memoryRepository) FailStart(_ context.Context, id, startError string) (deployments.Deployment, error) {
+	for index, deployment := range r.items {
+		if deployment.ID == id && deployment.Status == deployments.StatusStarting {
+			deployment.Status = deployments.StatusFailed
+			deployment.StartError = &startError
+			r.items[index] = deployment
+			return deployment, nil
+		}
+	}
+	return deployments.Deployment{}, deployments.ErrInvalidState
+}
+
+func (r *memoryRepository) MarkStopped(_ context.Context, id string) (deployments.Deployment, error) {
+	for index, deployment := range r.items {
+		if deployment.ID == id && deployment.Status != deployments.StatusBuilding && deployment.Status != deployments.StatusStarting {
+			deployment.Status = deployments.StatusStopped
+			deployment.ContainerID = nil
+			deployment.InternalPort = nil
+			deployment.HostPort = nil
+			r.items[index] = deployment
+			return deployment, nil
+		}
+	}
+	return deployments.Deployment{}, deployments.ErrInvalidState
+}
+
 type memorySourceStore struct {
 	files map[string]workspace.Files
 }
@@ -217,6 +290,23 @@ func (failingBuilder) Build(_ context.Context, deploymentID string, version int)
 	return build.Result{ImageName: build.ImageName(deploymentID, version), Log: "pip install failed"}, errors.New("docker build failed")
 }
 
+type memoryContainerManager struct {
+	removedID string
+}
+
+func (m *memoryContainerManager) Start(_ context.Context, _ string, _ string, _ int, _ containers.Limits) (containers.Container, error) {
+	return containers.Container{ID: "ab12cd34ef56", InternalPort: 8000, HostPort: 32781}, nil
+}
+
+func (m *memoryContainerManager) Remove(_ context.Context, containerID string) error {
+	m.removedID = containerID
+	return nil
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
 func (s *memorySourceStore) Store(_ context.Context, deploymentID string, files workspace.Files) error {
 	if s.files == nil {
 		s.files = make(map[string]workspace.Files)
@@ -229,3 +319,4 @@ var _ deployments.Repository = (*memoryRepository)(nil)
 var _ workspace.Store = (*memorySourceStore)(nil)
 var _ build.Builder = successfulBuilder{}
 var _ build.Builder = failingBuilder{}
+var _ containers.Manager = (*memoryContainerManager)(nil)

@@ -83,3 +83,23 @@ func TestLoadRejectsInvalidBuildTimeout(t *testing.T) {
 		t.Fatal("Load() error = nil, want error")
 	}
 }
+
+func TestLoadRejectsInvalidApplicationMemory(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
+	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
+	t.Setenv("MINICLOUD_APP_MEMORY", "two-hundred-megabytes")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+}
+
+func TestLoadRejectsNonFiniteApplicationCPUs(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
+	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
+	t.Setenv("MINICLOUD_APP_CPUS", "NaN")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+}

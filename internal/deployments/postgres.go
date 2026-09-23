@@ -12,7 +12,7 @@ import (
 
 const deploymentColumns = `
 	id::text, name, status::text, runtime, version, created_at, updated_at,
-	container_id, internal_port, public_identifier, image_name, build_log, build_error`
+	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error`
 
 // PostgresRepository stores deployment metadata in PostgreSQL.
 type PostgresRepository struct {
@@ -108,10 +108,46 @@ func (r *PostgresRepository) FailBuild(ctx context.Context, id, buildLog, buildE
 	return r.scanUpdatedDeployment(row, "fail deployment build")
 }
 
+func (r *PostgresRepository) MarkStarting(ctx context.Context, id string) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE deployments
+		SET status = $2, container_id = NULL, internal_port = NULL, host_port = NULL, start_error = NULL
+		WHERE id = $1 AND status = $3
+		RETURNING `+deploymentColumns, id, StatusStarting, StatusReadyToStart)
+	return r.scanUpdatedDeployment(row, "mark deployment starting")
+}
+
+func (r *PostgresRepository) CompleteStart(ctx context.Context, id, containerID string, internalPort, hostPort int) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE deployments
+		SET status = $2, container_id = $3, internal_port = $4, host_port = $5, start_error = NULL
+		WHERE id = $1 AND status = $6
+		RETURNING `+deploymentColumns, id, StatusRunning, containerID, internalPort, hostPort, StatusStarting)
+	return r.scanUpdatedDeployment(row, "complete deployment start")
+}
+
+func (r *PostgresRepository) FailStart(ctx context.Context, id, startError string) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE deployments
+		SET status = $2, start_error = $3
+		WHERE id = $1 AND status = $4
+		RETURNING `+deploymentColumns, id, StatusFailed, startError, StatusStarting)
+	return r.scanUpdatedDeployment(row, "fail deployment start")
+}
+
+func (r *PostgresRepository) MarkStopped(ctx context.Context, id string) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE deployments
+		SET status = $2, container_id = NULL, internal_port = NULL, host_port = NULL
+		WHERE id = $1 AND status NOT IN ($3, $4)
+		RETURNING `+deploymentColumns, id, StatusStopped, StatusBuilding, StatusStarting)
+	return r.scanUpdatedDeployment(row, "mark deployment stopped")
+}
+
 func (r *PostgresRepository) scanUpdatedDeployment(row pgx.Row, operation string) (Deployment, error) {
 	deployment, err := scanDeployment(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Deployment{}, ErrNotFound
+		return Deployment{}, ErrInvalidState
 	}
 	if err != nil {
 		return Deployment{}, fmt.Errorf("%s: %w", operation, err)
@@ -125,8 +161,8 @@ type rowScanner interface {
 
 func scanDeployment(row rowScanner) (Deployment, error) {
 	var deployment Deployment
-	var containerID, publicIdentifier, imageName, buildLog, buildError pgtype.Text
-	var internalPort pgtype.Int4
+	var containerID, publicIdentifier, imageName, buildLog, buildError, startError pgtype.Text
+	var internalPort, hostPort pgtype.Int4
 
 	err := row.Scan(
 		&deployment.ID,
@@ -138,10 +174,12 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		&deployment.UpdatedAt,
 		&containerID,
 		&internalPort,
+		&hostPort,
 		&publicIdentifier,
 		&imageName,
 		&buildLog,
 		&buildError,
+		&startError,
 	)
 	if err != nil {
 		return Deployment{}, err
@@ -152,6 +190,10 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 	if internalPort.Valid {
 		port := int(internalPort.Int32)
 		deployment.InternalPort = &port
+	}
+	if hostPort.Valid {
+		port := int(hostPort.Int32)
+		deployment.HostPort = &port
 	}
 	if publicIdentifier.Valid {
 		deployment.PublicIdentifier = &publicIdentifier.String
@@ -164,6 +206,9 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 	}
 	if buildError.Valid {
 		deployment.BuildError = &buildError.String
+	}
+	if startError.Valid {
+		deployment.StartError = &startError.String
 	}
 
 	return deployment, nil

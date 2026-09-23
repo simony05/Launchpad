@@ -12,6 +12,7 @@ import (
 
 	"github.com/simon/launchpad/internal/build"
 	"github.com/simon/launchpad/internal/config"
+	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/database"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/httpserver"
@@ -52,8 +53,10 @@ func main() {
 	deploymentRepository := deployments.NewPostgresRepository(pool)
 	sourceStore := workspace.NewLocalStore(cfg.WorkspaceRoot)
 	buildTimeout := time.Duration(cfg.BuildTimeoutSeconds) * time.Second
+	startTimeout := time.Duration(cfg.StartTimeoutSeconds) * time.Second
 	builder := build.NewDockerBuilder(cfg.WorkspaceRoot, buildTimeout)
-	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore, builder, buildTimeout)
+	containerManager := containers.NewDockerManager(startTimeout)
+	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore, builder, containerManager, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, buildTimeout, startTimeout)
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())

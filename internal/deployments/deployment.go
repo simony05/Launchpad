@@ -26,10 +26,12 @@ type Deployment struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 	ContainerID      *string   `json:"container_id"`
 	InternalPort     *int      `json:"internal_port"`
+	HostPort         *int      `json:"host_port"`
 	PublicIdentifier *string   `json:"public_identifier"`
 	ImageName        *string   `json:"image_name"`
 	BuildLog         *string   `json:"build_log"`
 	BuildError       *string   `json:"build_error"`
+	StartError       *string   `json:"start_error"`
 }
 
 // CreateInput contains metadata accepted when creating a deployment.

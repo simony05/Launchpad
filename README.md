@@ -4,9 +4,9 @@ MiniCloud is an agent-native deployment runtime for AI-generated prototypes.
 
 This repository contains the MiniCloud control plane. It accepts a small,
 validated Python/FastAPI source bundle, builds a Docker image from a
-MiniCloud-owned runtime template, and records the build result. It does not
-start generated application containers, schedule work, communicate with
-workers, or route public prototype traffic yet.
+MiniCloud-owned runtime template, and starts the resulting container. It does
+not schedule work, communicate with workers, or route public prototype traffic
+yet.
 
 ## Project structure
 
@@ -17,6 +17,7 @@ workers, or route public prototype traffic yet.
 ├── internal/database/       # PostgreSQL connection and embedded SQL migrations
 ├── internal/deployments/    # Deployment domain model and persistence repository
 ├── internal/build/          # MiniCloud-owned Docker image builder
+├── internal/containers/     # Docker lifecycle for generated applications
 ├── internal/httpserver/     # HTTP routes and server construction
 ├── internal/workspace/      # Validated per-deployment source storage
 ├── Dockerfile               # Container image for the control-plane binary
@@ -37,11 +38,14 @@ details as public Go APIs.
 | `MINICLOUD_DATABASE_URL` | none | Required PostgreSQL connection URL. |
 | `MINICLOUD_WORKSPACE_ROOT` | none | Required absolute path for deployment source workspaces. |
 | `MINICLOUD_BUILD_TIMEOUT_SECONDS` | `300` | Docker build deadline, from 30 to 1,800 seconds. |
+| `MINICLOUD_START_TIMEOUT_SECONDS` | `30` | Docker container-start deadline, from 5 to 300 seconds. |
+| `MINICLOUD_APP_CPUS` | `0.5` | CPU limit passed to each generated application container. |
+| `MINICLOUD_APP_MEMORY` | `256m` | Memory limit passed to each generated application container. |
 
 ## Deployment metadata API
 
 `POST /deployments` creates metadata, stores a generated Python source bundle,
-and builds an image. It does not start the resulting application container.
+builds an image, and starts the resulting application container.
 
 ```json
 {
@@ -60,14 +64,22 @@ including path-like names, are rejected. Read metadata with `GET /deployments/{i
 or list it with `GET /deployments`.
 
 The control plane transitions a valid deployment from `PENDING` to `BUILDING`,
-then to `READY_TO_START` when the image is created or `FAILED` when the build
-does not complete. The response stores the deterministic image name
-`minicloud/deployment:<deployment-id>-v1`, bounded build output, and a short
-build error when applicable.
+then `READY_TO_START`, `STARTING`, and finally `RUNNING`. Build or startup
+errors transition to `FAILED`. The response stores the deterministic image
+name `minicloud/deployment:<deployment-id>-v1`, bounded build output, and
+short build/start errors when applicable.
 
 MiniCloud generates a fixed Python 3.13 runtime template that installs
 `requirements.txt` and runs `uvicorn app:app` on port 8000. Agents cannot
 supply a Dockerfile.
+
+When started, Docker publishes the container's port 8000 on an automatically
+selected free EC2 host port. A running deployment response contains
+`container_id`, `internal_port` (`8000`), and `host_port`. Access it directly
+with `http://<EC2-public-ip>:<host_port>` until a future routing milestone.
+
+`DELETE /deployments/{id}` removes a running container and retains the
+deployment record with `STOPPED` status, preserving its build metadata.
 
 ## Build security
 
@@ -82,6 +94,12 @@ execute package build hooks, and mounting the Docker socket gives the control
 plane effective root-level authority on its host. Keep this single-host setup
 restricted to trusted development use. A future worker isolation milestone
 must address that boundary before untrusted public workloads are supported.
+
+Generated containers use Docker's default bridge network. They receive a
+private Docker IP; `--publish 0:8000` creates a host-port forwarding rule from
+the EC2 host's selected port to that private address on port 8000. The EC2
+security group remains the outer firewall: add an inbound Custom TCP rule for
+the returned `host_port`, restricted to `My IP`, before testing it remotely.
 
 The initial migration creates a `deployments` table with UUID identifiers,
 database-managed timestamps, and a PostgreSQL `deployment_status` enum. The
@@ -127,7 +145,7 @@ MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@l
 curl -i http://localhost:8080/health
 curl -i -X POST http://localhost:8080/deployments \
   -H 'Content-Type: application/json' \
-  -d '{"name":"example-api","runtime":"python","files":{"app.py":"from fastapi import FastAPI","requirements.txt":"fastapi"}}'
+  -d '{"name":"example-api","runtime":"python","files":{"app.py":"from fastapi import FastAPI\napp = FastAPI()","requirements.txt":"fastapi\nuvicorn"}}'
 ```
 
 Expected response:
