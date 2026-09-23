@@ -14,6 +14,7 @@ import (
 	"github.com/simon/launchpad/internal/build"
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/deployments"
+	"github.com/simon/launchpad/internal/routing"
 	"github.com/simon/launchpad/internal/workspace"
 )
 
@@ -96,7 +97,7 @@ func TestDeleteDeploymentStopsContainer(t *testing.T) {
 		ContainerID: stringPointer("ab12cd34ef56"),
 	}}}
 	manager := &memoryContainerManager{}
-	server := New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, successfulBuilder{}, manager, containers.Limits{CPUs: "0.5", Memory: "256m"}, time.Minute, time.Second)
+	server := New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, successfulBuilder{}, manager, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), time.Minute, time.Second)
 	request := httptest.NewRequest(http.MethodDelete, "/deployments/8bb34af2-396c-4b37-8905-1b93c6677a1d", nil)
 	response := httptest.NewRecorder()
 
@@ -139,7 +140,8 @@ func newTestServer() *http.Server {
 }
 
 func newTestServerWithBuilder(builder build.Builder) *http.Server {
-	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), &memoryRepository{}, &memorySourceStore{}, builder, &memoryContainerManager{}, containers.Limits{CPUs: "0.5", Memory: "256m"}, time.Minute, time.Second)
+	repository := &memoryRepository{}
+	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, builder, &memoryContainerManager{}, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), time.Minute, time.Second)
 }
 
 type memoryRepository struct {
@@ -163,6 +165,15 @@ func (r *memoryRepository) Create(_ context.Context, input deployments.CreateInp
 func (r *memoryRepository) Get(_ context.Context, id string) (deployments.Deployment, error) {
 	for _, deployment := range r.items {
 		if deployment.ID == id {
+			return deployment, nil
+		}
+	}
+	return deployments.Deployment{}, deployments.ErrNotFound
+}
+
+func (r *memoryRepository) GetByPublicIdentifier(_ context.Context, publicIdentifier string) (deployments.Deployment, error) {
+	for _, deployment := range r.items {
+		if deployment.PublicIdentifier != nil && *deployment.PublicIdentifier == publicIdentifier {
 			return deployment, nil
 		}
 	}
@@ -305,6 +316,10 @@ func (m *memoryContainerManager) Remove(_ context.Context, containerID string) e
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+func newTestRouter(repository *memoryRepository) routing.ApplicationRouter {
+	return routing.New(repository, "127.0.0.1", time.Second)
 }
 
 func (s *memorySourceStore) Store(_ context.Context, deploymentID string, files workspace.Files) error {

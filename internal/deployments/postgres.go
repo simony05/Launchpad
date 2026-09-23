@@ -25,13 +25,25 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 
 func (r *PostgresRepository) Create(ctx context.Context, input CreateInput) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
-		INSERT INTO deployments (name, status, runtime)
-		VALUES ($1, $2, $3)
+		INSERT INTO deployments (name, status, runtime, public_identifier)
+		VALUES ($1, $2, $3, replace(gen_random_uuid()::text, '-', ''))
 		RETURNING `+deploymentColumns, input.Name, StatusPending, input.Runtime)
 
 	deployment, err := scanDeployment(row)
 	if err != nil {
 		return Deployment{}, fmt.Errorf("create deployment: %w", err)
+	}
+	return deployment, nil
+}
+
+func (r *PostgresRepository) GetByPublicIdentifier(ctx context.Context, publicIdentifier string) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `SELECT `+deploymentColumns+` FROM deployments WHERE public_identifier = $1`, publicIdentifier)
+	deployment, err := scanDeployment(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Deployment{}, ErrNotFound
+	}
+	if err != nil {
+		return Deployment{}, fmt.Errorf("get deployment by public identifier: %w", err)
 	}
 	return deployment, nil
 }

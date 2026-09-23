@@ -16,6 +16,7 @@ import (
 	"github.com/simon/launchpad/internal/database"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/httpserver"
+	"github.com/simon/launchpad/internal/routing"
 	"github.com/simon/launchpad/internal/workspace"
 )
 
@@ -56,7 +57,8 @@ func main() {
 	startTimeout := time.Duration(cfg.StartTimeoutSeconds) * time.Second
 	builder := build.NewDockerBuilder(cfg.WorkspaceRoot, buildTimeout)
 	containerManager := containers.NewDockerManager(startTimeout)
-	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore, builder, containerManager, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, buildTimeout, startTimeout)
+	applicationRouter := routing.New(deploymentRepository, cfg.RouterUpstreamHost, time.Duration(cfg.RouterCacheTTLSeconds)*time.Second)
+	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore, builder, containerManager, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, applicationRouter, buildTimeout, startTimeout)
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())

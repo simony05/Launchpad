@@ -12,6 +12,7 @@ var ErrInvalidState = errors.New("deployment is not in a valid state for this op
 type Repository interface {
 	Create(context.Context, CreateInput) (Deployment, error)
 	Get(context.Context, string) (Deployment, error)
+	GetByPublicIdentifier(context.Context, string) (Deployment, error)
 	List(context.Context) ([]Deployment, error)
 	Delete(context.Context, string) error
 	MarkBuilding(context.Context, string) (Deployment, error)

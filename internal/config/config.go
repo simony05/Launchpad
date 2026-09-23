@@ -12,40 +12,46 @@ import (
 )
 
 const (
-	defaultHost         = "0.0.0.0"
-	defaultPort         = 8080
-	defaultLogLevel     = slog.LevelInfo
-	defaultBuildTimeout = 5 * 60
-	defaultStartTimeout = 30
-	defaultAppCPUs      = "0.5"
-	defaultAppMemory    = "256m"
+	defaultHost               = "0.0.0.0"
+	defaultPort               = 8080
+	defaultLogLevel           = slog.LevelInfo
+	defaultBuildTimeout       = 5 * 60
+	defaultStartTimeout       = 30
+	defaultAppCPUs            = "0.5"
+	defaultAppMemory          = "256m"
+	defaultRouterUpstreamHost = "host.docker.internal"
+	defaultRouterCacheTTL     = 5
 )
 
 // Config contains runtime configuration for the control plane.
 type Config struct {
-	Host                string
-	Port                int
-	LogLevel            slog.Level
-	DatabaseURL         string
-	WorkspaceRoot       string
-	BuildTimeoutSeconds int
-	StartTimeoutSeconds int
-	AppCPUs             string
-	AppMemory           string
+	Host                  string
+	Port                  int
+	LogLevel              slog.Level
+	DatabaseURL           string
+	WorkspaceRoot         string
+	BuildTimeoutSeconds   int
+	StartTimeoutSeconds   int
+	AppCPUs               string
+	AppMemory             string
+	RouterUpstreamHost    string
+	RouterCacheTTLSeconds int
 }
 
 // Load reads control-plane configuration from environment variables.
 func Load() (Config, error) {
 	cfg := Config{
-		Host:                envOrDefault("MINICLOUD_HOST", defaultHost),
-		Port:                defaultPort,
-		LogLevel:            defaultLogLevel,
-		DatabaseURL:         os.Getenv("MINICLOUD_DATABASE_URL"),
-		WorkspaceRoot:       os.Getenv("MINICLOUD_WORKSPACE_ROOT"),
-		BuildTimeoutSeconds: defaultBuildTimeout,
-		StartTimeoutSeconds: defaultStartTimeout,
-		AppCPUs:             envOrDefault("MINICLOUD_APP_CPUS", defaultAppCPUs),
-		AppMemory:           envOrDefault("MINICLOUD_APP_MEMORY", defaultAppMemory),
+		Host:                  envOrDefault("MINICLOUD_HOST", defaultHost),
+		Port:                  defaultPort,
+		LogLevel:              defaultLogLevel,
+		DatabaseURL:           os.Getenv("MINICLOUD_DATABASE_URL"),
+		WorkspaceRoot:         os.Getenv("MINICLOUD_WORKSPACE_ROOT"),
+		BuildTimeoutSeconds:   defaultBuildTimeout,
+		StartTimeoutSeconds:   defaultStartTimeout,
+		AppCPUs:               envOrDefault("MINICLOUD_APP_CPUS", defaultAppCPUs),
+		AppMemory:             envOrDefault("MINICLOUD_APP_MEMORY", defaultAppMemory),
+		RouterUpstreamHost:    envOrDefault("MINICLOUD_ROUTER_UPSTREAM_HOST", defaultRouterUpstreamHost),
+		RouterCacheTTLSeconds: defaultRouterCacheTTL,
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("MINICLOUD_DATABASE_URL must be set")
@@ -76,6 +82,16 @@ func Load() (Config, error) {
 	if !memoryPattern.MatchString(cfg.AppMemory) {
 		return Config{}, fmt.Errorf("MINICLOUD_APP_MEMORY must be a whole number followed by m or g")
 	}
+	if !hostnamePattern.MatchString(cfg.RouterUpstreamHost) {
+		return Config{}, fmt.Errorf("MINICLOUD_ROUTER_UPSTREAM_HOST must be a hostname or IPv4 address without a port")
+	}
+	if rawTTL := os.Getenv("MINICLOUD_ROUTER_CACHE_TTL_SECONDS"); rawTTL != "" {
+		ttl, err := strconv.Atoi(rawTTL)
+		if err != nil || ttl < 1 || ttl > 60 {
+			return Config{}, fmt.Errorf("MINICLOUD_ROUTER_CACHE_TTL_SECONDS must be an integer between 1 and 60")
+		}
+		cfg.RouterCacheTTLSeconds = ttl
+	}
 
 	if rawPort := os.Getenv("MINICLOUD_PORT"); rawPort != "" {
 		port, err := strconv.Atoi(rawPort)
@@ -97,6 +113,7 @@ func Load() (Config, error) {
 }
 
 var memoryPattern = regexp.MustCompile(`^[1-9][0-9]*[mMgG]$`)
+var hostnamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*$`)
 
 var logLevels = map[string]slog.Level{
 	"debug": slog.LevelDebug,

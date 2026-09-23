@@ -5,8 +5,8 @@ MiniCloud is an agent-native deployment runtime for AI-generated prototypes.
 This repository contains the MiniCloud control plane. It accepts a small,
 validated Python/FastAPI source bundle, builds a Docker image from a
 MiniCloud-owned runtime template, and starts the resulting container. It does
-not schedule work, communicate with workers, or route public prototype traffic
-yet.
+not schedule work or communicate with workers yet. Applications are available
+through a single-host reverse-proxy route.
 
 ## Project structure
 
@@ -19,6 +19,7 @@ yet.
 ├── internal/build/          # MiniCloud-owned Docker image builder
 ├── internal/containers/     # Docker lifecycle for generated applications
 ├── internal/httpserver/     # HTTP routes and server construction
+├── internal/routing/        # Public application reverse proxy and location cache
 ├── internal/workspace/      # Validated per-deployment source storage
 ├── Dockerfile               # Container image for the control-plane binary
 └── go.mod                   # Go module definition
@@ -41,6 +42,8 @@ details as public Go APIs.
 | `MINICLOUD_START_TIMEOUT_SECONDS` | `30` | Docker container-start deadline, from 5 to 300 seconds. |
 | `MINICLOUD_APP_CPUS` | `0.5` | CPU limit passed to each generated application container. |
 | `MINICLOUD_APP_MEMORY` | `256m` | Memory limit passed to each generated application container. |
+| `MINICLOUD_ROUTER_UPSTREAM_HOST` | `host.docker.internal` | Docker-host address used by the router to reach published application ports. |
+| `MINICLOUD_ROUTER_CACHE_TTL_SECONDS` | `5` | Application location-cache lifetime, from 1 to 60 seconds. |
 
 ## Deployment metadata API
 
@@ -76,10 +79,26 @@ supply a Dockerfile.
 When started, Docker publishes the container's port 8000 on an automatically
 selected free EC2 host port. A running deployment response contains
 `container_id`, `internal_port` (`8000`), and `host_port`. Access it directly
-with `http://<EC2-public-ip>:<host_port>` until a future routing milestone.
+with `http://<EC2-public-ip>:<host_port>` for diagnostics; use the routed path
+below for normal access.
 
 `DELETE /deployments/{id}` removes a running container and retains the
 deployment record with `STOPPED` status, preserving its build metadata.
+
+## Application routing
+
+Each deployment has a MiniCloud-generated, URL-safe `public_identifier`. A
+running application is available at:
+
+```text
+http://<EC2-public-ip>:8080/apps/<public_identifier>/...
+```
+
+The router resolves `public_identifier` to a `RUNNING` deployment, caches its
+host port briefly, removes the `/apps/<public_identifier>` prefix, then proxies
+the request. Method, path, query, body, and normal headers are preserved.
+Unknown identifiers return `404`; a known but non-running deployment returns
+`503`; an unreachable application port returns `502`.
 
 ## Build security
 
@@ -97,9 +116,10 @@ must address that boundary before untrusted public workloads are supported.
 
 Generated containers use Docker's default bridge network. They receive a
 private Docker IP; `--publish 0:8000` creates a host-port forwarding rule from
-the EC2 host's selected port to that private address on port 8000. The EC2
-security group remains the outer firewall: add an inbound Custom TCP rule for
-the returned `host_port`, restricted to `My IP`, before testing it remotely.
+the EC2 host's selected port to that private address on port 8000. The
+control-plane container reaches that host port through Docker's `host-gateway`
+mapping, exposed to it as `host.docker.internal`. The EC2 security group remains
+the outer firewall. Only port 8080 needs an inbound rule for routed requests.
 
 The initial migration creates a `deployments` table with UUID identifiers,
 database-managed timestamps, and a PostgreSQL `deployment_status` enum. The
@@ -173,13 +193,17 @@ docker build -t minicloud-control-plane .
 docker run --rm --network minicloud -p 8080:8080 \
   -v minicloud-workspaces:/workspaces \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  --add-host=host.docker.internal:host-gateway \
   --group-add "$(stat -c '%g' /var/run/docker.sock)" \
   -e MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@minicloud-postgres:5432/minicloud?sslmode=disable' \
   -e MINICLOUD_WORKSPACE_ROOT=/workspaces \
+  -e MINICLOUD_ROUTER_UPSTREAM_HOST=host.docker.internal \
   minicloud-control-plane
 ```
 
 Then use the same `curl` command above. Pass environment configuration with
 `-e`, for example `-e MINICLOUD_LOG_LEVEL=debug`. The `stat -c` form shown is
 for Amazon Linux on EC2; it adds the host Docker socket's group to the
-non-root control-plane process.
+non-root control-plane process. The `host-gateway` mapping is required on
+Linux because `localhost` inside the control-plane container is not the EC2
+host.

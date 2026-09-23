@@ -14,6 +14,7 @@ import (
 	"github.com/simon/launchpad/internal/build"
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/deployments"
+	"github.com/simon/launchpad/internal/routing"
 	"github.com/simon/launchpad/internal/workspace"
 )
 
@@ -27,14 +28,16 @@ const (
 )
 
 // New creates the MiniCloud control-plane HTTP server.
-func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, containerManager containers.Manager, containerLimits containers.Limits, buildTimeout, startTimeout time.Duration) *http.Server {
+func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, containerManager containers.Manager, containerLimits containers.Limits, applicationRouter routing.ApplicationRouter, buildTimeout, startTimeout time.Duration) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder, containerManager: containerManager, containerLimits: containerLimits}
+	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder, containerManager: containerManager, containerLimits: containerLimits, applicationRouter: applicationRouter}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
 	mux.HandleFunc("DELETE /deployments/{id}", deploymentHandler.delete)
+	mux.Handle("/apps/{publicIdentifier}", applicationRouter)
+	mux.Handle("/apps/{publicIdentifier}/{path...}", applicationRouter)
 
 	return &http.Server{
 		Addr:              address,
@@ -53,11 +56,12 @@ func health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type deploymentHandler struct {
-	repository       deployments.Repository
-	sourceStore      workspace.Store
-	builder          build.Builder
-	containerManager containers.Manager
-	containerLimits  containers.Limits
+	repository        deployments.Repository
+	sourceStore       workspace.Store
+	builder           build.Builder
+	containerManager  containers.Manager
+	containerLimits   containers.Limits
+	applicationRouter routing.ApplicationRouter
 }
 
 type createDeploymentRequest struct {
@@ -205,6 +209,9 @@ func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeRepositoryError(w, err, "stop deployment")
 		return
+	}
+	if deployment.PublicIdentifier != nil {
+		h.applicationRouter.Invalidate(*deployment.PublicIdentifier)
 	}
 	writeJSON(w, http.StatusOK, deployment)
 }

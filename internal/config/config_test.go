@@ -103,3 +103,13 @@ func TestLoadRejectsNonFiniteApplicationCPUs(t *testing.T) {
 		t.Fatal("Load() error = nil, want error")
 	}
 }
+
+func TestLoadRejectsRouterHostWithPort(t *testing.T) {
+	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
+	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
+	t.Setenv("MINICLOUD_ROUTER_UPSTREAM_HOST", "127.0.0.1:32781")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+}
