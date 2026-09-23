@@ -13,4 +13,7 @@ type Repository interface {
 	Get(context.Context, string) (Deployment, error)
 	List(context.Context) ([]Deployment, error)
 	Delete(context.Context, string) error
+	MarkBuilding(context.Context, string) (Deployment, error)
+	CompleteBuild(context.Context, string, string, string) (Deployment, error)
+	FailBuild(context.Context, string, string, string) (Deployment, error)
 }

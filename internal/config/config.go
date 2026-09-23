@@ -10,28 +10,31 @@ import (
 )
 
 const (
-	defaultHost     = "0.0.0.0"
-	defaultPort     = 8080
-	defaultLogLevel = slog.LevelInfo
+	defaultHost         = "0.0.0.0"
+	defaultPort         = 8080
+	defaultLogLevel     = slog.LevelInfo
+	defaultBuildTimeout = 5 * 60
 )
 
 // Config contains runtime configuration for the control plane.
 type Config struct {
-	Host          string
-	Port          int
-	LogLevel      slog.Level
-	DatabaseURL   string
-	WorkspaceRoot string
+	Host                string
+	Port                int
+	LogLevel            slog.Level
+	DatabaseURL         string
+	WorkspaceRoot       string
+	BuildTimeoutSeconds int
 }
 
 // Load reads control-plane configuration from environment variables.
 func Load() (Config, error) {
 	cfg := Config{
-		Host:          envOrDefault("MINICLOUD_HOST", defaultHost),
-		Port:          defaultPort,
-		LogLevel:      defaultLogLevel,
-		DatabaseURL:   os.Getenv("MINICLOUD_DATABASE_URL"),
-		WorkspaceRoot: os.Getenv("MINICLOUD_WORKSPACE_ROOT"),
+		Host:                envOrDefault("MINICLOUD_HOST", defaultHost),
+		Port:                defaultPort,
+		LogLevel:            defaultLogLevel,
+		DatabaseURL:         os.Getenv("MINICLOUD_DATABASE_URL"),
+		WorkspaceRoot:       os.Getenv("MINICLOUD_WORKSPACE_ROOT"),
+		BuildTimeoutSeconds: defaultBuildTimeout,
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("MINICLOUD_DATABASE_URL must be set")
@@ -41,6 +44,13 @@ func Load() (Config, error) {
 	}
 	if !filepath.IsAbs(cfg.WorkspaceRoot) {
 		return Config{}, fmt.Errorf("MINICLOUD_WORKSPACE_ROOT must be an absolute path")
+	}
+	if rawTimeout := os.Getenv("MINICLOUD_BUILD_TIMEOUT_SECONDS"); rawTimeout != "" {
+		timeout, err := strconv.Atoi(rawTimeout)
+		if err != nil || timeout < 30 || timeout > 1800 {
+			return Config{}, fmt.Errorf("MINICLOUD_BUILD_TIMEOUT_SECONDS must be an integer between 30 and 1800")
+		}
+		cfg.BuildTimeoutSeconds = timeout
 	}
 
 	if rawPort := os.Getenv("MINICLOUD_PORT"); rawPort != "" {

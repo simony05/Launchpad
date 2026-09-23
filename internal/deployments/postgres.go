@@ -11,8 +11,8 @@ import (
 )
 
 const deploymentColumns = `
-	id::text, name, status::text, runtime, created_at, updated_at,
-	container_id, internal_port, public_identifier`
+	id::text, name, status::text, runtime, version, created_at, updated_at,
+	container_id, internal_port, public_identifier, image_name, build_log, build_error`
 
 // PostgresRepository stores deployment metadata in PostgreSQL.
 type PostgresRepository struct {
@@ -81,13 +81,51 @@ func (r *PostgresRepository) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+func (r *PostgresRepository) MarkBuilding(ctx context.Context, id string) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE deployments
+		SET status = $2, image_name = NULL, build_log = NULL, build_error = NULL
+		WHERE id = $1 AND status = $3
+		RETURNING `+deploymentColumns, id, StatusBuilding, StatusPending)
+	return r.scanUpdatedDeployment(row, "mark deployment building")
+}
+
+func (r *PostgresRepository) CompleteBuild(ctx context.Context, id, imageName, buildLog string) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE deployments
+		SET status = $2, image_name = $3, build_log = $4, build_error = NULL
+		WHERE id = $1 AND status = $5
+		RETURNING `+deploymentColumns, id, StatusReadyToStart, imageName, buildLog, StatusBuilding)
+	return r.scanUpdatedDeployment(row, "complete deployment build")
+}
+
+func (r *PostgresRepository) FailBuild(ctx context.Context, id, buildLog, buildError string) (Deployment, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE deployments
+		SET status = $2, build_log = $3, build_error = $4
+		WHERE id = $1 AND status = $5
+		RETURNING `+deploymentColumns, id, StatusFailed, buildLog, buildError, StatusBuilding)
+	return r.scanUpdatedDeployment(row, "fail deployment build")
+}
+
+func (r *PostgresRepository) scanUpdatedDeployment(row pgx.Row, operation string) (Deployment, error) {
+	deployment, err := scanDeployment(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Deployment{}, ErrNotFound
+	}
+	if err != nil {
+		return Deployment{}, fmt.Errorf("%s: %w", operation, err)
+	}
+	return deployment, nil
+}
+
 type rowScanner interface {
 	Scan(...any) error
 }
 
 func scanDeployment(row rowScanner) (Deployment, error) {
 	var deployment Deployment
-	var containerID, publicIdentifier pgtype.Text
+	var containerID, publicIdentifier, imageName, buildLog, buildError pgtype.Text
 	var internalPort pgtype.Int4
 
 	err := row.Scan(
@@ -95,11 +133,15 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		&deployment.Name,
 		&deployment.Status,
 		&deployment.Runtime,
+		&deployment.Version,
 		&deployment.CreatedAt,
 		&deployment.UpdatedAt,
 		&containerID,
 		&internalPort,
 		&publicIdentifier,
+		&imageName,
+		&buildLog,
+		&buildError,
 	)
 	if err != nil {
 		return Deployment{}, err
@@ -113,6 +155,15 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 	}
 	if publicIdentifier.Valid {
 		deployment.PublicIdentifier = &publicIdentifier.String
+	}
+	if imageName.Valid {
+		deployment.ImageName = &imageName.String
+	}
+	if buildLog.Valid {
+		deployment.BuildLog = &buildLog.String
+	}
+	if buildError.Valid {
+		deployment.BuildError = &buildError.String
 	}
 
 	return deployment, nil

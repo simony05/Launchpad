@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/simon/launchpad/internal/build"
 	"github.com/simon/launchpad/internal/config"
 	"github.com/simon/launchpad/internal/database"
 	"github.com/simon/launchpad/internal/deployments"
@@ -50,7 +51,9 @@ func main() {
 
 	deploymentRepository := deployments.NewPostgresRepository(pool)
 	sourceStore := workspace.NewLocalStore(cfg.WorkspaceRoot)
-	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore)
+	buildTimeout := time.Duration(cfg.BuildTimeoutSeconds) * time.Second
+	builder := build.NewDockerBuilder(cfg.WorkspaceRoot, buildTimeout)
+	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore, builder, buildTimeout)
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())

@@ -35,6 +35,14 @@ func NewLocalStore(root string) *LocalStore {
 	return &LocalStore{root: root}
 }
 
+// Path returns the canonical workspace path for a deployment UUID.
+func Path(root, deploymentID string) (string, error) {
+	if _, err := uuid.Parse(deploymentID); err != nil {
+		return "", errors.New("deployment workspace id must be a UUID")
+	}
+	return filepath.Join(root, deploymentID), nil
+}
+
 // ValidateFiles permits exactly the V1 source files and enforces size limits.
 func ValidateFiles(files Files) error {
 	if len(files) != 2 {
@@ -72,8 +80,8 @@ func (s *LocalStore) Store(ctx context.Context, deploymentID string, files Files
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := uuid.Parse(deploymentID); err != nil {
-		return errors.New("deployment workspace id must be a UUID")
+	if _, err := Path(s.root, deploymentID); err != nil {
+		return err
 	}
 	if err := ValidateFiles(files); err != nil {
 		return err
@@ -82,7 +90,7 @@ func (s *LocalStore) Store(ctx context.Context, deploymentID string, files Files
 		return fmt.Errorf("create workspace root: %w", err)
 	}
 
-	finalPath := filepath.Join(s.root, deploymentID)
+	finalPath, _ := Path(s.root, deploymentID)
 	if _, err := os.Lstat(finalPath); err == nil {
 		return errors.New("deployment workspace already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {

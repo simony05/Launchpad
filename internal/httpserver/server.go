@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/simon/launchpad/internal/build"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/workspace"
 )
@@ -18,17 +19,17 @@ import (
 const (
 	readHeaderTimeout  = 5 * time.Second
 	readTimeout        = 15 * time.Second
-	writeTimeout       = 15 * time.Second
 	idleTimeout        = 60 * time.Second
 	maxRequestBodySize = 2 << 20
 	cleanupTimeout     = 5 * time.Second
+	buildResponseGrace = 15 * time.Second
 )
 
 // New creates the MiniCloud control-plane HTTP server.
-func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store) *http.Server {
+func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, buildTimeout time.Duration) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore}
+	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
@@ -38,7 +39,7 @@ func New(address string, logger *slog.Logger, deploymentRepository deployments.R
 		Handler:           requestLogger(logger, mux),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
+		WriteTimeout:      buildTimeout + buildResponseGrace,
 		IdleTimeout:       idleTimeout,
 	}
 }
@@ -52,6 +53,7 @@ func health(w http.ResponseWriter, _ *http.Request) {
 type deploymentHandler struct {
 	repository  deployments.Repository
 	sourceStore workspace.Store
+	builder     build.Builder
 }
 
 type createDeploymentRequest struct {
@@ -86,7 +88,36 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	deployment, err = h.repository.MarkBuilding(r.Context(), deployment.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "start deployment build")
+		return
+	}
+
+	buildResult, buildErr := h.builder.Build(r.Context(), deployment.ID, deployment.Version)
+	if buildErr != nil {
+		deployment, err = h.failBuild(deployment.ID, buildResult.Log, buildErr.Error())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "record deployment build failure")
+			return
+		}
+		writeJSON(w, http.StatusCreated, deployment)
+		return
+	}
+
+	deployment, err = h.repository.CompleteBuild(r.Context(), deployment.ID, buildResult.ImageName, buildResult.Log)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "record deployment build")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, deployment)
+}
+
+func (h deploymentHandler) failBuild(id, buildLog, buildError string) (deployments.Deployment, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	return h.repository.FailBuild(ctx, id, buildLog, buildError)
 }
 
 func (h deploymentHandler) get(w http.ResponseWriter, r *http.Request) {
