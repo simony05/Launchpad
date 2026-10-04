@@ -61,7 +61,7 @@ func (m *DockerManager) Start(ctx context.Context, deploymentID, imageName strin
 
 	startCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
-	containerName := fmt.Sprintf("minicloud-%s-v%d", deploymentID, version)
+	containerName := fmt.Sprintf("launchpad-%s-v%d", deploymentID, version)
 	output, err := m.run(startCtx,
 		"run", "--detach",
 		"--name", containerName,

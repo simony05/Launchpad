@@ -5,12 +5,18 @@ import (
 	"testing"
 )
 
+func setRequiredEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("LAUNCHPAD_DATABASE_URL", "postgres://launchpad:launchpad@localhost:5432/launchpad")
+	t.Setenv("LAUNCHPAD_WORKSPACE_ROOT", "/tmp/launchpad-workspaces")
+	t.Setenv("LAUNCHPAD_PUBLIC_BASE_DOMAIN", "apps.example.com")
+}
+
 func TestLoadDefaults(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_HOST", "")
-	t.Setenv("MINICLOUD_PORT", "")
-	t.Setenv("MINICLOUD_LOG_LEVEL", "")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_HOST", "")
+	t.Setenv("LAUNCHPAD_PORT", "")
+	t.Setenv("LAUNCHPAD_LOG_LEVEL", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -23,9 +29,8 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidPort(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_PORT", "not-a-port")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_PORT", "not-a-port")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")
@@ -33,9 +38,8 @@ func TestLoadRejectsInvalidPort(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidLogLevel(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_LOG_LEVEL", "verbose")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_LOG_LEVEL", "verbose")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")
@@ -43,9 +47,8 @@ func TestLoadRejectsInvalidLogLevel(t *testing.T) {
 }
 
 func TestLoadSetsLogLevel(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_LOG_LEVEL", "debug")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_LOG_LEVEL", "debug")
 
 	cfg, err := Load()
 	if err != nil {
@@ -57,8 +60,9 @@ func TestLoadSetsLogLevel(t *testing.T) {
 }
 
 func TestLoadRequiresDatabaseURL(t *testing.T) {
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_DATABASE_URL", "")
+	t.Setenv("LAUNCHPAD_WORKSPACE_ROOT", "/tmp/launchpad-workspaces")
+	t.Setenv("LAUNCHPAD_PUBLIC_BASE_DOMAIN", "apps.example.com")
+	t.Setenv("LAUNCHPAD_DATABASE_URL", "")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")
@@ -66,8 +70,8 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 }
 
 func TestLoadRequiresAbsoluteWorkspaceRoot(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "workspaces")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_WORKSPACE_ROOT", "workspaces")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")
@@ -75,9 +79,8 @@ func TestLoadRequiresAbsoluteWorkspaceRoot(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidBuildTimeout(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_BUILD_TIMEOUT_SECONDS", "10")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_BUILD_TIMEOUT_SECONDS", "10")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")
@@ -85,9 +88,8 @@ func TestLoadRejectsInvalidBuildTimeout(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidApplicationMemory(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_APP_MEMORY", "two-hundred-megabytes")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_APP_MEMORY", "two-hundred-megabytes")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")
@@ -95,9 +97,8 @@ func TestLoadRejectsInvalidApplicationMemory(t *testing.T) {
 }
 
 func TestLoadRejectsNonFiniteApplicationCPUs(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_APP_CPUS", "NaN")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_APP_CPUS", "NaN")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")
@@ -105,9 +106,18 @@ func TestLoadRejectsNonFiniteApplicationCPUs(t *testing.T) {
 }
 
 func TestLoadRejectsRouterHostWithPort(t *testing.T) {
-	t.Setenv("MINICLOUD_DATABASE_URL", "postgres://minicloud:minicloud@localhost:5432/minicloud")
-	t.Setenv("MINICLOUD_WORKSPACE_ROOT", "/tmp/minicloud-workspaces")
-	t.Setenv("MINICLOUD_ROUTER_UPSTREAM_HOST", "127.0.0.1:32781")
+	setRequiredEnvironment(t)
+	t.Setenv("LAUNCHPAD_ROUTER_UPSTREAM_HOST", "127.0.0.1:32781")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+}
+
+func TestLoadRequiresPublicBaseDomain(t *testing.T) {
+	t.Setenv("LAUNCHPAD_DATABASE_URL", "postgres://launchpad:launchpad@localhost:5432/launchpad")
+	t.Setenv("LAUNCHPAD_WORKSPACE_ROOT", "/tmp/launchpad-workspaces")
+	t.Setenv("LAUNCHPAD_PUBLIC_BASE_DOMAIN", "")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")

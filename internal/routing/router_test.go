@@ -21,7 +21,7 @@ func TestRouterProxiesPathQueryBodyAndHeaders(t *testing.T) {
 		if request.URL.Path != "/nested/path" || request.URL.RawQuery != "hello=world" {
 			t.Fatalf("request URL = %s", request.URL)
 		}
-		if request.Header.Get("X-MiniCloud-Test") != "present" {
+		if request.Header.Get("X-Launchpad-Test") != "present" {
 			t.Fatal("custom header was not proxied")
 		}
 		body, err := io.ReadAll(request.Body)
@@ -35,13 +35,13 @@ func TestRouterProxiesPathQueryBodyAndHeaders(t *testing.T) {
 
 	port := backendPort(t, backend.URL)
 	resolver := &memoryResolver{deployment: deployments.Deployment{Status: deployments.StatusRunning, HostPort: &port}}
-	router := New(resolver, "127.0.0.1", time.Minute)
+	router := New(resolver, "127.0.0.1", "apps.example.com", time.Minute)
 	mux := http.NewServeMux()
 	mux.Handle("/apps/{publicIdentifier}", router)
 	mux.Handle("/apps/{publicIdentifier}/{path...}", router)
 
 	request := httptest.NewRequest(http.MethodPost, "/apps/"+publicIdentifier+"/nested/path?hello=world", strings.NewReader("request body"))
-	request.Header.Set("X-MiniCloud-Test", "present")
+	request.Header.Set("X-Launchpad-Test", "present")
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 
@@ -52,7 +52,7 @@ func TestRouterProxiesPathQueryBodyAndHeaders(t *testing.T) {
 
 func TestRouterReturnsUnavailableForStoppedDeployment(t *testing.T) {
 	resolver := &memoryResolver{deployment: deployments.Deployment{Status: deployments.StatusStopped}}
-	router := New(resolver, "127.0.0.1", time.Minute)
+	router := New(resolver, "127.0.0.1", "apps.example.com", time.Minute)
 	mux := http.NewServeMux()
 	mux.Handle("/apps/{publicIdentifier}", router)
 	request := httptest.NewRequest(http.MethodGet, "/apps/"+publicIdentifier, nil)
@@ -62,6 +62,28 @@ func TestRouterReturnsUnavailableForStoppedDeployment(t *testing.T) {
 
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestRouterProxiesByHostHeader(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/health" || request.URL.RawQuery != "full=true" {
+			t.Fatalf("request URL = %s", request.URL)
+		}
+		_, _ = w.Write([]byte("host routed"))
+	}))
+	defer backend.Close()
+
+	port := backendPort(t, backend.URL)
+	router := New(&memoryResolver{deployment: deployments.Deployment{Status: deployments.StatusRunning, HostPort: &port}}, "127.0.0.1", "apps.example.com", time.Minute)
+	request := httptest.NewRequest(http.MethodGet, "/health?full=true", nil)
+	request.Host = publicIdentifier + ".apps.example.com"
+	response := httptest.NewRecorder()
+
+	router.ServeHostHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "host routed" {
+		t.Fatalf("response = (%d, %q)", response.Code, response.Body.String())
 	}
 }
 

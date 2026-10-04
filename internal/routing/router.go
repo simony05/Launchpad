@@ -28,6 +28,9 @@ type Resolver interface {
 // deployment stops.
 type ApplicationRouter interface {
 	http.Handler
+	ServeHostHTTP(http.ResponseWriter, *http.Request)
+	MatchesHost(string) bool
+	AllowsHost(context.Context, string) bool
 	Invalidate(string)
 }
 
@@ -39,27 +42,60 @@ type cacheEntry struct {
 // Router resolves a public application identifier and proxies it to the
 // deployment's published Docker host port.
 type Router struct {
-	resolver     Resolver
-	upstreamHost string
-	cacheTTL     time.Duration
+	resolver         Resolver
+	upstreamHost     string
+	publicBaseDomain string
+	cacheTTL         time.Duration
 
 	mu    sync.RWMutex
 	cache map[string]cacheEntry
 	now   func() time.Time
 }
 
-func New(resolver Resolver, upstreamHost string, cacheTTL time.Duration) *Router {
+func New(resolver Resolver, upstreamHost, publicBaseDomain string, cacheTTL time.Duration) *Router {
 	return &Router{
-		resolver:     resolver,
-		upstreamHost: upstreamHost,
-		cacheTTL:     cacheTTL,
-		cache:        make(map[string]cacheEntry),
-		now:          time.Now,
+		resolver:         resolver,
+		upstreamHost:     upstreamHost,
+		publicBaseDomain: strings.ToLower(strings.TrimSuffix(publicBaseDomain, ".")),
+		cacheTTL:         cacheTTL,
+		cache:            make(map[string]cacheEntry),
+		now:              time.Now,
 	}
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	publicIdentifier := request.PathValue("publicIdentifier")
+	path, rawPath := applicationPath(request, publicIdentifier)
+	r.proxy(w, request, publicIdentifier, path, rawPath)
+}
+
+// ServeHostHTTP proxies a request whose subdomain identifies an application.
+func (r *Router) ServeHostHTTP(w http.ResponseWriter, request *http.Request) {
+	publicIdentifier, ok := r.publicIdentifierFromHost(request.Host)
+	if !ok {
+		writeError(w, http.StatusNotFound, "application not found")
+		return
+	}
+	r.proxy(w, request, publicIdentifier, request.URL.Path, request.URL.RawPath)
+}
+
+// MatchesHost reports whether a Host header is a valid Launchpad app hostname.
+func (r *Router) MatchesHost(host string) bool {
+	_, ok := r.publicIdentifierFromHost(host)
+	return ok
+}
+
+// AllowsHost is used by the TLS edge before issuing an on-demand certificate.
+func (r *Router) AllowsHost(ctx context.Context, host string) bool {
+	publicIdentifier, ok := r.publicIdentifierFromHost(host)
+	if !ok {
+		return false
+	}
+	deployment, err := r.resolver.GetByPublicIdentifier(ctx, publicIdentifier)
+	return err == nil && deployment.Status == deployments.StatusRunning && deployment.HostPort != nil
+}
+
+func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdentifier, path, rawPath string) {
 	if !publicIdentifierPattern.MatchString(publicIdentifier) {
 		writeError(w, http.StatusNotFound, "application not found")
 		return
@@ -79,7 +115,6 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		Scheme: "http",
 		Host:   net.JoinHostPort(r.upstreamHost, strconv.Itoa(hostPort)),
 	}
-	path, rawPath := applicationPath(request, publicIdentifier)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
 			proxyRequest.SetURL(target)
@@ -135,6 +170,26 @@ func applicationPath(request *http.Request, publicIdentifier string) (string, st
 		rawPath = ""
 	}
 	return path, rawPath
+}
+
+func (r *Router) publicIdentifierFromHost(host string) (string, bool) {
+	host = normalizedHost(host)
+	suffix := "." + r.publicBaseDomain
+	if !strings.HasSuffix(host, suffix) {
+		return "", false
+	}
+	publicIdentifier := strings.TrimSuffix(host, suffix)
+	if strings.Contains(publicIdentifier, ".") || !publicIdentifierPattern.MatchString(publicIdentifier) {
+		return "", false
+	}
+	return publicIdentifier, true
+}
+
+func normalizedHost(host string) string {
+	if value, _, err := net.SplitHostPort(host); err == nil {
+		host = value
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

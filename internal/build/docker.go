@@ -48,7 +48,7 @@ type Builder interface {
 
 type dockerRunner func(context.Context, string, string, string) (string, error)
 
-// DockerBuilder invokes Docker using the MiniCloud-owned Python runtime template.
+// DockerBuilder invokes Docker using the Launchpad-owned Python runtime template.
 type DockerBuilder struct {
 	workspaceRoot string
 	timeout       time.Duration
@@ -97,7 +97,7 @@ func (b *DockerBuilder) Build(ctx context.Context, deploymentID string, version 
 
 // ImageName is deterministic and contains no caller-provided name data.
 func ImageName(deploymentID string, version int) string {
-	return fmt.Sprintf("minicloud/deployment:%s-v%d", deploymentID, version)
+	return fmt.Sprintf("launchpad/deployment:%s-v%d", deploymentID, version)
 }
 
 func writeRuntimeTemplate(workspacePath string) (string, error) {
@@ -109,7 +109,7 @@ func writeRuntimeTemplate(workspacePath string) (string, error) {
 		return "", errors.New("deployment workspace is not a directory")
 	}
 
-	file, err := os.CreateTemp(workspacePath, ".minicloud-Dockerfile-")
+	file, err := os.CreateTemp(workspacePath, ".launchpad-Dockerfile-")
 	if err != nil {
 		return "", fmt.Errorf("create runtime template: %w", err)
 	}

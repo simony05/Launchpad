@@ -15,7 +15,7 @@ const (
 	StatusReadyToStart Status = "READY_TO_START"
 )
 
-// Deployment is MiniCloud's metadata record for an application deployment.
+// Deployment is Launchpad's metadata record for an application deployment.
 type Deployment struct {
 	ID               string    `json:"id"`
 	Name             string    `json:"name"`
@@ -28,6 +28,7 @@ type Deployment struct {
 	InternalPort     *int      `json:"internal_port"`
 	HostPort         *int      `json:"host_port"`
 	PublicIdentifier *string   `json:"public_identifier"`
+	PublicURL        *string   `json:"public_url"`
 	ImageName        *string   `json:"image_name"`
 	BuildLog         *string   `json:"build_log"`
 	BuildError       *string   `json:"build_error"`

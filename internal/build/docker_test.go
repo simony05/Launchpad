@@ -41,7 +41,7 @@ func TestBuildUsesGeneratedTemplateAndDeterministicImageName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if result.ImageName != "minicloud/deployment:8bb34af2-396c-4b37-8905-1b93c6677a1d-v1" {
+	if result.ImageName != "launchpad/deployment:8bb34af2-396c-4b37-8905-1b93c6677a1d-v1" {
 		t.Fatalf("ImageName = %q", result.ImageName)
 	}
 	if result.Log != "build complete" {

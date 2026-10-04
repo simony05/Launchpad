@@ -1,12 +1,12 @@
-# MiniCloud
+# Launchpad
 
-MiniCloud is an agent-native deployment runtime for AI-generated prototypes.
+Launchpad is an agent-native deployment runtime for AI-generated prototypes.
 
-This repository contains the MiniCloud control plane. It accepts a small,
+This repository contains the Launchpad control plane. It accepts a small,
 validated Python/FastAPI source bundle, builds a Docker image from a
-MiniCloud-owned runtime template, and starts the resulting container. It does
+Launchpad-owned runtime template, and starts the resulting container. It does
 not schedule work or communicate with workers yet. Applications are available
-through a single-host reverse-proxy route.
+through a single-host reverse proxy and HTTPS edge.
 
 ## Project structure
 
@@ -16,16 +16,17 @@ through a single-host reverse-proxy route.
 ├── internal/config/         # Environment-derived, validated application config
 ├── internal/database/       # PostgreSQL connection and embedded SQL migrations
 ├── internal/deployments/    # Deployment domain model and persistence repository
-├── internal/build/          # MiniCloud-owned Docker image builder
+├── internal/build/          # Launchpad-owned Docker image builder
 ├── internal/containers/     # Docker lifecycle for generated applications
 ├── internal/httpserver/     # HTTP routes and server construction
 ├── internal/routing/        # Public application reverse proxy and location cache
+├── Caddyfile                # Public HTTPS termination configuration
 ├── internal/workspace/      # Validated per-deployment source storage
 ├── Dockerfile               # Container image for the control-plane binary
 └── go.mod                   # Go module definition
 ```
 
-As MiniCloud grows, deployment, worker, scheduler, build, and routing
+As Launchpad grows, deployment, worker, scheduler, build, and routing
 packages can be added under `internal/` without exposing implementation
 details as public Go APIs.
 
@@ -33,17 +34,18 @@ details as public Go APIs.
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
-| `MINICLOUD_HOST` | `0.0.0.0` | Address on which the server listens. |
-| `MINICLOUD_PORT` | `8080` | TCP port on which the server listens. |
-| `MINICLOUD_LOG_LEVEL` | `info` | Structured log level: `debug`, `info`, `warn`, or `error`. |
-| `MINICLOUD_DATABASE_URL` | none | Required PostgreSQL connection URL. |
-| `MINICLOUD_WORKSPACE_ROOT` | none | Required absolute path for deployment source workspaces. |
-| `MINICLOUD_BUILD_TIMEOUT_SECONDS` | `300` | Docker build deadline, from 30 to 1,800 seconds. |
-| `MINICLOUD_START_TIMEOUT_SECONDS` | `30` | Docker container-start deadline, from 5 to 300 seconds. |
-| `MINICLOUD_APP_CPUS` | `0.5` | CPU limit passed to each generated application container. |
-| `MINICLOUD_APP_MEMORY` | `256m` | Memory limit passed to each generated application container. |
-| `MINICLOUD_ROUTER_UPSTREAM_HOST` | `host.docker.internal` | Docker-host address used by the router to reach published application ports. |
-| `MINICLOUD_ROUTER_CACHE_TTL_SECONDS` | `5` | Application location-cache lifetime, from 1 to 60 seconds. |
+| `LAUNCHPAD_HOST` | `0.0.0.0` | Address on which the server listens. |
+| `LAUNCHPAD_PORT` | `8080` | TCP port on which the server listens. |
+| `LAUNCHPAD_LOG_LEVEL` | `info` | Structured log level: `debug`, `info`, `warn`, or `error`. |
+| `LAUNCHPAD_DATABASE_URL` | none | Required PostgreSQL connection URL. |
+| `LAUNCHPAD_WORKSPACE_ROOT` | none | Required absolute path for deployment source workspaces. |
+| `LAUNCHPAD_BUILD_TIMEOUT_SECONDS` | `300` | Docker build deadline, from 30 to 1,800 seconds. |
+| `LAUNCHPAD_START_TIMEOUT_SECONDS` | `30` | Docker container-start deadline, from 5 to 300 seconds. |
+| `LAUNCHPAD_APP_CPUS` | `0.5` | CPU limit passed to each generated application container. |
+| `LAUNCHPAD_APP_MEMORY` | `256m` | Memory limit passed to each generated application container. |
+| `LAUNCHPAD_ROUTER_UPSTREAM_HOST` | `host.docker.internal` | Docker-host address used by the router to reach published application ports. |
+| `LAUNCHPAD_ROUTER_CACHE_TTL_SECONDS` | `5` | Application location-cache lifetime, from 1 to 60 seconds. |
+| `LAUNCHPAD_PUBLIC_BASE_DOMAIN` | none | Required public base domain, such as `apps.example.com`. |
 
 ## Deployment metadata API
 
@@ -69,10 +71,10 @@ or list it with `GET /deployments`.
 The control plane transitions a valid deployment from `PENDING` to `BUILDING`,
 then `READY_TO_START`, `STARTING`, and finally `RUNNING`. Build or startup
 errors transition to `FAILED`. The response stores the deterministic image
-name `minicloud/deployment:<deployment-id>-v1`, bounded build output, and
+name `launchpad/deployment:<deployment-id>-v1`, bounded build output, and
 short build/start errors when applicable.
 
-MiniCloud generates a fixed Python 3.13 runtime template that installs
+Launchpad generates a fixed Python 3.13 runtime template that installs
 `requirements.txt` and runs `uvicorn app:app` on port 8000. Agents cannot
 supply a Dockerfile.
 
@@ -87,23 +89,92 @@ deployment record with `STOPPED` status, preserving its build metadata.
 
 ## Application routing
 
-Each deployment has a MiniCloud-generated, URL-safe `public_identifier`. A
+Each deployment has a Launchpad-generated, URL-safe `public_identifier`. A
 running application is available at:
 
 ```text
-http://<EC2-public-ip>:8080/apps/<public_identifier>/...
+https://<public_identifier>.<public-base-domain>/...
 ```
 
-The router resolves `public_identifier` to a `RUNNING` deployment, caches its
-host port briefly, removes the `/apps/<public_identifier>` prefix, then proxies
-the request. Method, path, query, body, and normal headers are preserved.
-Unknown identifiers return `404`; a known but non-running deployment returns
-`503`; an unreachable application port returns `502`.
+The control-plane response includes `public_url` only after the deployment is
+`RUNNING`. Its Host-header router extracts the left-most label, resolves that
+identifier to a deployment, caches its host port briefly, and proxies the full
+path. Method, path, query, body, and normal headers are preserved. Unknown
+identifiers return `404`; a known but non-running deployment returns `503`; an
+unreachable application port returns `502`.
+
+## Public HTTPS
+
+Launchpad uses Caddy as a small edge proxy. Caddy terminates TLS on ports 80
+and 443, retains the original Host header, and forwards HTTP over the private
+Docker network to Launchpad. Launchpad then selects the generated application.
+TLS does not terminate in individual generated application containers.
+
+This configuration uses wildcard DNS with Caddy on-demand TLS: Caddy issues
+and renews an ACME certificate for each active prototype hostname on its first
+HTTPS request. This avoids a DNS-provider-specific Caddy build and a wildcard
+certificate; the control-plane `ask` endpoint authorizes only hostnames for
+currently running deployments.
+
+### EC2 setup
+
+Choose a base domain such as `apps.example.com`. At your DNS provider, create
+an `A` record:
+
+```text
+*.apps.example.com  ->  <EC2 Elastic IP or public IPv4>
+```
+
+Use an Elastic IP if you need the DNS destination to remain stable across an
+instance stop/start. In the EC2 security group, add inbound TCP rules for ports
+80 and 443 from `0.0.0.0/0`. Keep the control-plane port 8080 limited to your
+own IP; Caddy reaches it privately over Docker networking.
+
+Build and run the control plane with its public domain configured. Replace the
+database password and domain values with yours:
+
+```sh
+docker build -t launchpad-control-plane:milestone-8 .
+
+docker rm -f launchpad-control-plane
+docker run -d --name launchpad-control-plane --restart unless-stopped \
+  --network launchpad \
+  -p 8080:8080 \
+  -v launchpad-workspaces:/workspaces \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --add-host=host.docker.internal:host-gateway \
+  --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+  -e LAUNCHPAD_DATABASE_URL='postgres://launchpad:YOUR_POSTGRES_PASSWORD@launchpad-postgres:5432/launchpad?sslmode=disable' \
+  -e LAUNCHPAD_WORKSPACE_ROOT=/workspaces \
+  -e LAUNCHPAD_ROUTER_UPSTREAM_HOST=host.docker.internal \
+  -e LAUNCHPAD_PUBLIC_BASE_DOMAIN=apps.example.com \
+  launchpad-control-plane:milestone-8
+```
+
+Start Caddy on the same Docker network. Its data volume persists issued
+certificates and renewal state:
+
+```sh
+docker volume create launchpad-caddy-data
+
+docker run -d --name launchpad-caddy --restart unless-stopped \
+  --network launchpad \
+  -p 80:80 \
+  -p 443:443 \
+  -v launchpad-caddy-data:/data \
+  -v "$(pwd)/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  -e LAUNCHPAD_ACME_EMAIL=you@example.com \
+  caddy:2
+```
+
+After DNS has propagated, create a deployment and open its returned
+`public_url`. The first HTTPS request can take a few seconds while Caddy obtains
+the certificate; subsequent requests use the stored certificate.
 
 ## Build security
 
 The build context contains only the two validated source files plus a
-temporary Dockerfile generated by MiniCloud. Docker is invoked from Go with an
+temporary Dockerfile generated by Launchpad. Docker is invoked from Go with an
 argument list, not a shell command, and the image tag contains only a UUID and
 version. This blocks obvious filename, path traversal, and shell-injection
 abuse.
@@ -119,7 +190,8 @@ private Docker IP; `--publish 0:8000` creates a host-port forwarding rule from
 the EC2 host's selected port to that private address on port 8000. The
 control-plane container reaches that host port through Docker's `host-gateway`
 mapping, exposed to it as `host.docker.internal`. The EC2 security group remains
-the outer firewall. Only port 8080 needs an inbound rule for routed requests.
+the outer firewall. Public traffic enters Caddy on ports 80 and 443; keep port
+8080 restricted to control-plane administration.
 
 The initial migration creates a `deployments` table with UUID identifiers,
 database-managed timestamps, and a PostgreSQL `deployment_status` enum. The
@@ -131,29 +203,29 @@ public-identifier fields are reserved for future worker and routing milestones.
 Create an isolated Docker network and a persistent PostgreSQL container:
 
 ```sh
-docker network create minicloud
-docker volume create minicloud-postgres-data
-docker volume create minicloud-workspaces
-docker run -d --name minicloud-postgres --restart unless-stopped \
-  --network minicloud \
-  -e POSTGRES_DB=minicloud \
-  -e POSTGRES_USER=minicloud \
+docker network create launchpad
+docker volume create launchpad-postgres-data
+docker volume create launchpad-workspaces
+docker run -d --name launchpad-postgres --restart unless-stopped \
+  --network launchpad \
+  -e POSTGRES_DB=launchpad \
+  -e POSTGRES_USER=launchpad \
   -e POSTGRES_PASSWORD=replace-this-development-password \
-  -v minicloud-postgres-data:/var/lib/postgresql/data \
+  -v launchpad-postgres-data:/var/lib/postgresql/data \
   postgres:17
 ```
 
 The database has no published host port. A control-plane container on the same
-Docker network reaches it using the `minicloud-postgres` hostname.
+Docker network reaches it using the `launchpad-postgres` hostname.
 
 ## Local development
 
 Go 1.24 or later is required.
 
 ```sh
-docker run --rm --name minicloud-postgres -p 5432:5432 \
-  -e POSTGRES_DB=minicloud \
-  -e POSTGRES_USER=minicloud \
+docker run --rm --name launchpad-postgres -p 5432:5432 \
+  -e POSTGRES_DB=launchpad \
+  -e POSTGRES_USER=launchpad \
   -e POSTGRES_PASSWORD=replace-this-development-password \
   postgres:17
 ```
@@ -161,7 +233,7 @@ docker run --rm --name minicloud-postgres -p 5432:5432 \
 In another terminal, run the service and test it:
 
 ```sh
-MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@localhost:5432/minicloud?sslmode=disable' MINICLOUD_WORKSPACE_ROOT=/tmp/minicloud-workspaces go run ./cmd/control-plane
+LAUNCHPAD_DATABASE_URL='postgres://launchpad:replace-this-development-password@localhost:5432/launchpad?sslmode=disable' LAUNCHPAD_WORKSPACE_ROOT=/tmp/launchpad-workspaces LAUNCHPAD_PUBLIC_BASE_DOMAIN=apps.example.com go run ./cmd/control-plane
 curl -i http://localhost:8080/health
 curl -i -X POST http://localhost:8080/deployments \
   -H 'Content-Type: application/json' \
@@ -180,7 +252,7 @@ Content-Type: application/json
 To set configuration explicitly:
 
 ```sh
-MINICLOUD_HOST=127.0.0.1 MINICLOUD_PORT=8081 MINICLOUD_LOG_LEVEL=debug MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@localhost:5432/minicloud?sslmode=disable' MINICLOUD_WORKSPACE_ROOT=/tmp/minicloud-workspaces go run ./cmd/control-plane
+LAUNCHPAD_HOST=127.0.0.1 LAUNCHPAD_PORT=8081 LAUNCHPAD_LOG_LEVEL=debug LAUNCHPAD_DATABASE_URL='postgres://launchpad:replace-this-development-password@localhost:5432/launchpad?sslmode=disable' LAUNCHPAD_WORKSPACE_ROOT=/tmp/launchpad-workspaces LAUNCHPAD_PUBLIC_BASE_DOMAIN=apps.example.com go run ./cmd/control-plane
 curl -i http://localhost:8081/health
 ```
 
@@ -189,20 +261,21 @@ curl -i http://localhost:8081/health
 Build and run the control plane:
 
 ```sh
-docker build -t minicloud-control-plane .
-docker run --rm --network minicloud -p 8080:8080 \
-  -v minicloud-workspaces:/workspaces \
+docker build -t launchpad-control-plane .
+docker run --rm --name launchpad-control-plane --network launchpad -p 8080:8080 \
+  -v launchpad-workspaces:/workspaces \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --add-host=host.docker.internal:host-gateway \
   --group-add "$(stat -c '%g' /var/run/docker.sock)" \
-  -e MINICLOUD_DATABASE_URL='postgres://minicloud:replace-this-development-password@minicloud-postgres:5432/minicloud?sslmode=disable' \
-  -e MINICLOUD_WORKSPACE_ROOT=/workspaces \
-  -e MINICLOUD_ROUTER_UPSTREAM_HOST=host.docker.internal \
-  minicloud-control-plane
+  -e LAUNCHPAD_DATABASE_URL='postgres://launchpad:replace-this-development-password@launchpad-postgres:5432/launchpad?sslmode=disable' \
+  -e LAUNCHPAD_WORKSPACE_ROOT=/workspaces \
+  -e LAUNCHPAD_ROUTER_UPSTREAM_HOST=host.docker.internal \
+  -e LAUNCHPAD_PUBLIC_BASE_DOMAIN=apps.example.com \
+  launchpad-control-plane
 ```
 
 Then use the same `curl` command above. Pass environment configuration with
-`-e`, for example `-e MINICLOUD_LOG_LEVEL=debug`. The `stat -c` form shown is
+`-e`, for example `-e LAUNCHPAD_LOG_LEVEL=debug`. The `stat -c` form shown is
 for Amazon Linux on EC2; it adds the host Docker socket's group to the
 non-root control-plane process. The `host-gateway` mapping is required on
 Linux because `localhost` inside the control-plane container is not the EC2

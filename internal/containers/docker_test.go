@@ -25,7 +25,7 @@ func TestStartRecordsDockerAssignedPort(t *testing.T) {
 		}
 	}
 
-	container, err := manager.Start(context.Background(), testDeploymentID, "minicloud/deployment:test-v1", 1, Limits{CPUs: "0.5", Memory: "256m"})
+	container, err := manager.Start(context.Background(), testDeploymentID, "launchpad/deployment:test-v1", 1, Limits{CPUs: "0.5", Memory: "256m"})
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}

@@ -58,7 +58,7 @@ func TestCreateDeployment(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusCreated)
 	}
-	if body := response.Body.String(); !strings.Contains(body, `"status":"RUNNING"`) || !strings.Contains(body, `"host_port":32781`) {
+	if body := response.Body.String(); !strings.Contains(body, `"status":"RUNNING"`) || !strings.Contains(body, `"host_port":32781`) || !strings.Contains(body, `"public_url":"https://aabbccddeeff00112233445566778899.apps.example.com"`) {
 		t.Fatalf("body = %q, want running deployment", body)
 	}
 }
@@ -97,7 +97,7 @@ func TestDeleteDeploymentStopsContainer(t *testing.T) {
 		ContainerID: stringPointer("ab12cd34ef56"),
 	}}}
 	manager := &memoryContainerManager{}
-	server := New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, successfulBuilder{}, manager, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), time.Minute, time.Second)
+	server := New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, successfulBuilder{}, manager, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), "apps.example.com", time.Minute, time.Second)
 	request := httptest.NewRequest(http.MethodDelete, "/deployments/8bb34af2-396c-4b37-8905-1b93c6677a1d", nil)
 	response := httptest.NewRecorder()
 
@@ -141,7 +141,7 @@ func newTestServer() *http.Server {
 
 func newTestServerWithBuilder(builder build.Builder) *http.Server {
 	repository := &memoryRepository{}
-	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, builder, &memoryContainerManager{}, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), time.Minute, time.Second)
+	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, builder, &memoryContainerManager{}, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), "apps.example.com", time.Minute, time.Second)
 }
 
 type memoryRepository struct {
@@ -150,13 +150,14 @@ type memoryRepository struct {
 
 func (r *memoryRepository) Create(_ context.Context, input deployments.CreateInput) (deployments.Deployment, error) {
 	deployment := deployments.Deployment{
-		ID:        "8bb34af2-396c-4b37-8905-1b93c6677a1d",
-		Name:      input.Name,
-		Runtime:   input.Runtime,
-		Version:   1,
-		Status:    deployments.StatusPending,
-		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		ID:               "8bb34af2-396c-4b37-8905-1b93c6677a1d",
+		Name:             input.Name,
+		Runtime:          input.Runtime,
+		Version:          1,
+		Status:           deployments.StatusPending,
+		PublicIdentifier: stringPointer("aabbccddeeff00112233445566778899"),
+		CreatedAt:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		UpdatedAt:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 	r.items = append(r.items, deployment)
 	return deployment, nil
@@ -319,7 +320,7 @@ func stringPointer(value string) *string {
 }
 
 func newTestRouter(repository *memoryRepository) routing.ApplicationRouter {
-	return routing.New(repository, "127.0.0.1", time.Second)
+	return routing.New(repository, "127.0.0.1", "apps.example.com", time.Second)
 }
 
 func (s *memorySourceStore) Store(_ context.Context, deploymentID string, files workspace.Files) error {

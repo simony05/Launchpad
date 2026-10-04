@@ -27,21 +27,22 @@ const (
 	buildResponseGrace = 15 * time.Second
 )
 
-// New creates the MiniCloud control-plane HTTP server.
-func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, containerManager containers.Manager, containerLimits containers.Limits, applicationRouter routing.ApplicationRouter, buildTimeout, startTimeout time.Duration) *http.Server {
+// New creates the Launchpad control-plane HTTP server.
+func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, containerManager containers.Manager, containerLimits containers.Limits, applicationRouter routing.ApplicationRouter, publicBaseDomain string, buildTimeout, startTimeout time.Duration) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder, containerManager: containerManager, containerLimits: containerLimits, applicationRouter: applicationRouter}
+	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder, containerManager: containerManager, containerLimits: containerLimits, applicationRouter: applicationRouter, publicBaseDomain: publicBaseDomain}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
 	mux.HandleFunc("DELETE /deployments/{id}", deploymentHandler.delete)
+	mux.HandleFunc("GET /internal/tls/allow", deploymentHandler.allowTLS)
 	mux.Handle("/apps/{publicIdentifier}", applicationRouter)
 	mux.Handle("/apps/{publicIdentifier}/{path...}", applicationRouter)
 
 	return &http.Server{
 		Addr:              address,
-		Handler:           requestLogger(logger, mux),
+		Handler:           requestLogger(logger, hostRouter(mux, applicationRouter)),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      buildTimeout + startTimeout + buildResponseGrace,
@@ -62,6 +63,7 @@ type deploymentHandler struct {
 	containerManager  containers.Manager
 	containerLimits   containers.Limits
 	applicationRouter routing.ApplicationRouter
+	publicBaseDomain  string
 }
 
 type createDeploymentRequest struct {
@@ -109,7 +111,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "record deployment build failure")
 			return
 		}
-		writeJSON(w, http.StatusCreated, deployment)
+		h.writeDeployment(w, http.StatusCreated, deployment)
 		return
 	}
 
@@ -134,7 +136,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "record deployment startup failure")
 			return
 		}
-		writeJSON(w, http.StatusCreated, deployment)
+		h.writeDeployment(w, http.StatusCreated, deployment)
 		return
 	}
 	deployment, err = h.repository.CompleteStart(r.Context(), deployment.ID, container.ID, container.InternalPort, container.HostPort)
@@ -142,12 +144,12 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 		defer cancel()
 		_ = h.containerManager.Remove(cleanupCtx, container.ID)
-		_, _ = h.repository.FailStart(cleanupCtx, deployment.ID, "container started but MiniCloud could not record its startup")
+		_, _ = h.repository.FailStart(cleanupCtx, deployment.ID, "container started but Launchpad could not record its startup")
 		writeRepositoryError(w, err, "record deployment startup")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, deployment)
+	h.writeDeployment(w, http.StatusCreated, deployment)
 }
 
 func (h deploymentHandler) failBuild(id, buildLog, buildError string) (deployments.Deployment, error) {
@@ -179,7 +181,7 @@ func (h deploymentHandler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, deployment)
+	h.writeDeployment(w, http.StatusOK, deployment)
 }
 
 func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +215,7 @@ func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
 	if deployment.PublicIdentifier != nil {
 		h.applicationRouter.Invalidate(*deployment.PublicIdentifier)
 	}
-	writeJSON(w, http.StatusOK, deployment)
+	h.writeDeployment(w, http.StatusOK, deployment)
 }
 
 func (h deploymentHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +225,31 @@ func (h deploymentHandler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	for index := range deploymentList {
+		h.decorateDeployment(&deploymentList[index])
+	}
 	writeJSON(w, http.StatusOK, deploymentList)
+}
+
+func (h deploymentHandler) allowTLS(w http.ResponseWriter, r *http.Request) {
+	if !h.applicationRouter.AllowsHost(r.Context(), r.URL.Query().Get("domain")) {
+		writeError(w, http.StatusForbidden, "certificate not authorized")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h deploymentHandler) writeDeployment(w http.ResponseWriter, status int, deployment deployments.Deployment) {
+	h.decorateDeployment(&deployment)
+	writeJSON(w, status, deployment)
+}
+
+func (h deploymentHandler) decorateDeployment(deployment *deployments.Deployment) {
+	if deployment.Status != deployments.StatusRunning || deployment.PublicIdentifier == nil {
+		return
+	}
+	publicURL := "https://" + *deployment.PublicIdentifier + "." + h.publicBaseDomain
+	deployment.PublicURL = &publicURL
 }
 
 func decodeCreateDeploymentRequest(w http.ResponseWriter, r *http.Request) (createDeploymentRequest, error) {
@@ -282,5 +308,15 @@ func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 			"path", r.URL.Path,
 			"duration", time.Since(started),
 		)
+	})
+}
+
+func hostRouter(next http.Handler, applicationRouter routing.ApplicationRouter) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if applicationRouter.MatchesHost(r.Host) {
+			applicationRouter.ServeHostHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
