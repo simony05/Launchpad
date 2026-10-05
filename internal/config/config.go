@@ -14,6 +14,7 @@ import (
 const (
 	defaultHost               = "0.0.0.0"
 	defaultPort               = 8080
+	defaultWorkerPort         = 8090
 	defaultLogLevel           = slog.LevelInfo
 	defaultBuildTimeout       = 5 * 60
 	defaultStartTimeout       = 30
@@ -29,7 +30,6 @@ type Config struct {
 	Port                  int
 	LogLevel              slog.Level
 	DatabaseURL           string
-	WorkspaceRoot         string
 	BuildTimeoutSeconds   int
 	StartTimeoutSeconds   int
 	AppCPUs               string
@@ -37,6 +37,8 @@ type Config struct {
 	RouterUpstreamHost    string
 	RouterCacheTTLSeconds int
 	PublicBaseDomain      string
+	WorkerURL             string
+	WorkerToken           string
 }
 
 // Load reads control-plane configuration from environment variables.
@@ -46,7 +48,6 @@ func Load() (Config, error) {
 		Port:                  defaultPort,
 		LogLevel:              defaultLogLevel,
 		DatabaseURL:           os.Getenv("LAUNCHPAD_DATABASE_URL"),
-		WorkspaceRoot:         os.Getenv("LAUNCHPAD_WORKSPACE_ROOT"),
 		BuildTimeoutSeconds:   defaultBuildTimeout,
 		StartTimeoutSeconds:   defaultStartTimeout,
 		AppCPUs:               envOrDefault("LAUNCHPAD_APP_CPUS", defaultAppCPUs),
@@ -54,15 +55,11 @@ func Load() (Config, error) {
 		RouterUpstreamHost:    envOrDefault("LAUNCHPAD_ROUTER_UPSTREAM_HOST", defaultRouterUpstreamHost),
 		RouterCacheTTLSeconds: defaultRouterCacheTTL,
 		PublicBaseDomain:      os.Getenv("LAUNCHPAD_PUBLIC_BASE_DOMAIN"),
+		WorkerURL:             os.Getenv("LAUNCHPAD_WORKER_URL"),
+		WorkerToken:           os.Getenv("LAUNCHPAD_WORKER_TOKEN"),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("LAUNCHPAD_DATABASE_URL must be set")
-	}
-	if cfg.WorkspaceRoot == "" {
-		return Config{}, fmt.Errorf("LAUNCHPAD_WORKSPACE_ROOT must be set")
-	}
-	if !filepath.IsAbs(cfg.WorkspaceRoot) {
-		return Config{}, fmt.Errorf("LAUNCHPAD_WORKSPACE_ROOT must be an absolute path")
 	}
 	if rawTimeout := os.Getenv("LAUNCHPAD_BUILD_TIMEOUT_SECONDS"); rawTimeout != "" {
 		timeout, err := strconv.Atoi(rawTimeout)
@@ -90,6 +87,12 @@ func Load() (Config, error) {
 	if !domainPattern.MatchString(cfg.PublicBaseDomain) {
 		return Config{}, fmt.Errorf("LAUNCHPAD_PUBLIC_BASE_DOMAIN must be a domain such as apps.example.com")
 	}
+	if cfg.WorkerURL == "" {
+		return Config{}, fmt.Errorf("LAUNCHPAD_WORKER_URL must be set")
+	}
+	if cfg.WorkerToken == "" {
+		return Config{}, fmt.Errorf("LAUNCHPAD_WORKER_TOKEN must be set")
+	}
 	if rawTTL := os.Getenv("LAUNCHPAD_ROUTER_CACHE_TTL_SECONDS"); rawTTL != "" {
 		ttl, err := strconv.Atoi(rawTTL)
 		if err != nil || ttl < 1 || ttl > 60 {
@@ -116,6 +119,51 @@ func Load() (Config, error) {
 
 	return cfg, nil
 }
+
+// WorkerConfig contains the worker-only settings. It has no database access.
+type WorkerConfig struct {
+	Host                string
+	Port                int
+	LogLevel            slog.Level
+	WorkspaceRoot       string
+	BuildTimeoutSeconds int
+	StartTimeoutSeconds int
+	WorkerToken         string
+}
+
+func LoadWorker() (WorkerConfig, error) {
+	cfg := WorkerConfig{Host: envOrDefault("LAUNCHPAD_WORKER_HOST", defaultHost), Port: defaultWorkerPort, LogLevel: defaultLogLevel, WorkspaceRoot: os.Getenv("LAUNCHPAD_WORKSPACE_ROOT"), BuildTimeoutSeconds: defaultBuildTimeout, StartTimeoutSeconds: defaultStartTimeout, WorkerToken: os.Getenv("LAUNCHPAD_WORKER_TOKEN")}
+	if cfg.WorkspaceRoot == "" || !filepath.IsAbs(cfg.WorkspaceRoot) {
+		return WorkerConfig{}, fmt.Errorf("LAUNCHPAD_WORKSPACE_ROOT must be an absolute path")
+	}
+	if cfg.WorkerToken == "" {
+		return WorkerConfig{}, fmt.Errorf("LAUNCHPAD_WORKER_TOKEN must be set")
+	}
+	if raw := os.Getenv("LAUNCHPAD_WORKER_PORT"); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil || port < 1 || port > 65535 {
+			return WorkerConfig{}, fmt.Errorf("LAUNCHPAD_WORKER_PORT must be an integer between 1 and 65535")
+		}
+		cfg.Port = port
+	}
+	if raw := os.Getenv("LAUNCHPAD_BUILD_TIMEOUT_SECONDS"); raw != "" {
+		timeout, err := strconv.Atoi(raw)
+		if err != nil || timeout < 30 || timeout > 1800 {
+			return WorkerConfig{}, fmt.Errorf("LAUNCHPAD_BUILD_TIMEOUT_SECONDS must be an integer between 30 and 1800")
+		}
+		cfg.BuildTimeoutSeconds = timeout
+	}
+	if raw := os.Getenv("LAUNCHPAD_START_TIMEOUT_SECONDS"); raw != "" {
+		timeout, err := strconv.Atoi(raw)
+		if err != nil || timeout < 5 || timeout > 300 {
+			return WorkerConfig{}, fmt.Errorf("LAUNCHPAD_START_TIMEOUT_SECONDS must be an integer between 5 and 300")
+		}
+		cfg.StartTimeoutSeconds = timeout
+	}
+	return cfg, nil
+}
+
+func (c WorkerConfig) Address() string { return net.JoinHostPort(c.Host, strconv.Itoa(c.Port)) }
 
 var memoryPattern = regexp.MustCompile(`^[1-9][0-9]*[mMgG]$`)
 var hostnamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*$`)

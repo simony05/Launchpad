@@ -33,10 +33,26 @@ type Container struct {
 	HostPort     int
 }
 
+// Status is the observed state of a generated application container.
+type Status struct {
+	Running     bool
+	ContainerID string
+	HostPort    int
+}
+
+// Resources is the subset of Docker host capacity needed by the first worker.
+type Resources struct {
+	CPUs              int
+	MemoryBytes       int64
+	ContainersRunning int
+}
+
 // Manager starts and removes generated application containers.
 type Manager interface {
 	Start(context.Context, string, string, int, Limits) (Container, error)
 	Remove(context.Context, string) error
+	Status(context.Context, string, int) (Status, error)
+	Resources(context.Context) (Resources, error)
 }
 
 type commandRunner func(context.Context, ...string) (string, error)
@@ -106,6 +122,51 @@ func (m *DockerManager) Remove(ctx context.Context, containerID string) error {
 	removeCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 	return m.remove(removeCtx, containerID)
+}
+
+func (m *DockerManager) Status(ctx context.Context, deploymentID string, version int) (Status, error) {
+	if _, err := uuid.Parse(deploymentID); err != nil || version < 1 {
+		return Status{}, errors.New("invalid deployment status configuration")
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	containerName := fmt.Sprintf("launchpad-%s-v%d", deploymentID, version)
+	output, err := m.run(statusCtx, "inspect", "--format", "{{.State.Running}} {{.Id}} {{(index (index .NetworkSettings.Ports \"8000/tcp\") 0).HostPort}}", containerName)
+	if err != nil {
+		if strings.Contains(output, "No such object") {
+			return Status{}, nil
+		}
+		return Status{}, commandError(statusCtx, "inspect container", output, err)
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 3 {
+		return Status{}, errors.New("Docker returned an invalid container status")
+	}
+	hostPort, err := strconv.Atoi(fields[2])
+	if err != nil || hostPort < 1 || hostPort > 65535 {
+		return Status{}, errors.New("Docker returned an invalid host port")
+	}
+	return Status{Running: fields[0] == "true", ContainerID: fields[1], HostPort: hostPort}, nil
+}
+
+func (m *DockerManager) Resources(ctx context.Context) (Resources, error) {
+	resourcesCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	output, err := m.run(resourcesCtx, "info", "--format", "{{.NCPU}} {{.MemTotal}} {{.ContainersRunning}}")
+	if err != nil {
+		return Resources{}, commandError(resourcesCtx, "inspect Docker resources", output, err)
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 3 {
+		return Resources{}, errors.New("Docker returned invalid resource information")
+	}
+	cpus, cpuErr := strconv.Atoi(fields[0])
+	memoryBytes, memoryErr := strconv.ParseInt(fields[1], 10, 64)
+	running, runningErr := strconv.Atoi(fields[2])
+	if cpuErr != nil || memoryErr != nil || runningErr != nil || cpus < 1 || memoryBytes < 1 || running < 0 {
+		return Resources{}, errors.New("Docker returned invalid resource information")
+	}
+	return Resources{CPUs: cpus, MemoryBytes: memoryBytes, ContainersRunning: running}, nil
 }
 
 func (m *DockerManager) remove(ctx context.Context, containerID string) error {

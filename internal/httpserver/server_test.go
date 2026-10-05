@@ -15,6 +15,7 @@ import (
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/routing"
+	"github.com/simon/launchpad/internal/worker"
 	"github.com/simon/launchpad/internal/workspace"
 )
 
@@ -96,8 +97,8 @@ func TestDeleteDeploymentStopsContainer(t *testing.T) {
 		Status:      deployments.StatusRunning,
 		ContainerID: stringPointer("ab12cd34ef56"),
 	}}}
-	manager := &memoryContainerManager{}
-	server := New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, successfulBuilder{}, manager, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), "apps.example.com", time.Minute, time.Second)
+	worker := &memoryWorker{}
+	server := New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, worker, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), "apps.example.com", time.Minute, time.Second)
 	request := httptest.NewRequest(http.MethodDelete, "/deployments/8bb34af2-396c-4b37-8905-1b93c6677a1d", nil)
 	response := httptest.NewRecorder()
 
@@ -106,8 +107,8 @@ func TestDeleteDeploymentStopsContainer(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"STOPPED"`) {
 		t.Fatalf("response = (%d, %q), want stopped deployment", response.Code, response.Body.String())
 	}
-	if manager.removedID != "ab12cd34ef56" {
-		t.Fatalf("removed ID = %q", manager.removedID)
+	if worker.removedID != "ab12cd34ef56" {
+		t.Fatalf("removed ID = %q", worker.removedID)
 	}
 }
 
@@ -141,7 +142,7 @@ func newTestServer() *http.Server {
 
 func newTestServerWithBuilder(builder build.Builder) *http.Server {
 	repository := &memoryRepository{}
-	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memorySourceStore{}, builder, &memoryContainerManager{}, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), "apps.example.com", time.Minute, time.Second)
+	return New("", slog.New(slog.NewTextHandler(io.Discard, nil)), repository, &memoryWorker{builder: builder}, containers.Limits{CPUs: "0.5", Memory: "256m"}, newTestRouter(repository), "apps.example.com", time.Minute, time.Second)
 }
 
 type memoryRepository struct {
@@ -306,6 +307,29 @@ type memoryContainerManager struct {
 	removedID string
 }
 
+type memoryWorker struct {
+	builder   build.Builder
+	removedID string
+}
+
+func (w *memoryWorker) Start(ctx context.Context, input worker.StartRequest) (worker.StartResult, error) {
+	if w.builder != nil {
+		result, err := w.builder.Build(ctx, input.DeploymentID, input.Version)
+		if err != nil {
+			return worker.StartResult{ImageName: result.ImageName, BuildLog: result.Log, BuildError: err.Error()}, nil
+		}
+		return worker.StartResult{ImageName: result.ImageName, BuildLog: result.Log, Container: &containers.Container{ID: "ab12cd34ef56", InternalPort: 8000, HostPort: 32781}}, nil
+	}
+	return worker.StartResult{ImageName: build.ImageName(input.DeploymentID, input.Version), BuildLog: "build complete", Container: &containers.Container{ID: "ab12cd34ef56", InternalPort: 8000, HostPort: 32781}}, nil
+}
+func (w *memoryWorker) Stop(_ context.Context, id string) error { w.removedID = id; return nil }
+func (w *memoryWorker) Status(context.Context, string, int) (worker.Status, error) {
+	return worker.Status{}, nil
+}
+func (w *memoryWorker) Resources(context.Context) (worker.Resources, error) {
+	return worker.Resources{}, nil
+}
+
 func (m *memoryContainerManager) Start(_ context.Context, _ string, _ string, _ int, _ containers.Limits) (containers.Container, error) {
 	return containers.Container{ID: "ab12cd34ef56", InternalPort: 8000, HostPort: 32781}, nil
 }
@@ -335,4 +359,4 @@ var _ deployments.Repository = (*memoryRepository)(nil)
 var _ workspace.Store = (*memorySourceStore)(nil)
 var _ build.Builder = successfulBuilder{}
 var _ build.Builder = failingBuilder{}
-var _ containers.Manager = (*memoryContainerManager)(nil)
+var _ worker.Client = (*memoryWorker)(nil)

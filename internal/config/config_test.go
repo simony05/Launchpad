@@ -8,8 +8,9 @@ import (
 func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("LAUNCHPAD_DATABASE_URL", "postgres://launchpad:launchpad@localhost:5432/launchpad")
-	t.Setenv("LAUNCHPAD_WORKSPACE_ROOT", "/tmp/launchpad-workspaces")
 	t.Setenv("LAUNCHPAD_PUBLIC_BASE_DOMAIN", "apps.example.com")
+	t.Setenv("LAUNCHPAD_WORKER_URL", "http://10.0.0.10:8090")
+	t.Setenv("LAUNCHPAD_WORKER_TOKEN", "test-token")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -63,15 +64,6 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("LAUNCHPAD_WORKSPACE_ROOT", "/tmp/launchpad-workspaces")
 	t.Setenv("LAUNCHPAD_PUBLIC_BASE_DOMAIN", "apps.example.com")
 	t.Setenv("LAUNCHPAD_DATABASE_URL", "")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("Load() error = nil, want error")
-	}
-}
-
-func TestLoadRequiresAbsoluteWorkspaceRoot(t *testing.T) {
-	setRequiredEnvironment(t)
-	t.Setenv("LAUNCHPAD_WORKSPACE_ROOT", "workspaces")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want error")

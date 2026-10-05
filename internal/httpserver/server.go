@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/simon/launchpad/internal/build"
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/routing"
+	"github.com/simon/launchpad/internal/worker"
 	"github.com/simon/launchpad/internal/workspace"
 )
 
@@ -28,10 +28,10 @@ const (
 )
 
 // New creates the Launchpad control-plane HTTP server.
-func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, sourceStore workspace.Store, builder build.Builder, containerManager containers.Manager, containerLimits containers.Limits, applicationRouter routing.ApplicationRouter, publicBaseDomain string, buildTimeout, startTimeout time.Duration) *http.Server {
+func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, workerClient worker.Client, containerLimits containers.Limits, applicationRouter routing.ApplicationRouter, publicBaseDomain string, buildTimeout, startTimeout time.Duration) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	deploymentHandler := deploymentHandler{repository: deploymentRepository, sourceStore: sourceStore, builder: builder, containerManager: containerManager, containerLimits: containerLimits, applicationRouter: applicationRouter, publicBaseDomain: publicBaseDomain}
+	deploymentHandler := deploymentHandler{repository: deploymentRepository, workerClient: workerClient, containerLimits: containerLimits, applicationRouter: applicationRouter, publicBaseDomain: publicBaseDomain}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
@@ -58,9 +58,7 @@ func health(w http.ResponseWriter, _ *http.Request) {
 
 type deploymentHandler struct {
 	repository        deployments.Repository
-	sourceStore       workspace.Store
-	builder           build.Builder
-	containerManager  containers.Manager
+	workerClient      worker.Client
 	containerLimits   containers.Limits
 	applicationRouter routing.ApplicationRouter
 	publicBaseDomain  string
@@ -87,26 +85,15 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "create deployment")
 		return
 	}
-	if err := h.sourceStore.Store(r.Context(), deployment.ID, request.Files); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-		if cleanupErr := h.repository.Delete(cleanupCtx, deployment.ID); cleanupErr != nil {
-			writeError(w, http.StatusInternalServerError, "create deployment")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "store deployment source")
-		return
-	}
-
 	deployment, err = h.repository.MarkBuilding(r.Context(), deployment.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "start deployment build")
 		return
 	}
 
-	buildResult, buildErr := h.builder.Build(r.Context(), deployment.ID, deployment.Version)
-	if buildErr != nil {
-		deployment, err = h.failBuild(deployment.ID, buildResult.Log, buildErr.Error())
+	result, workerErr := h.workerClient.Start(r.Context(), worker.StartRequest{DeploymentID: deployment.ID, Version: deployment.Version, Files: request.Files, Limits: h.containerLimits})
+	if workerErr != nil {
+		deployment, err = h.failBuild(deployment.ID, "", workerErr.Error())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "record deployment build failure")
 			return
@@ -115,7 +102,16 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deployment, err = h.repository.CompleteBuild(r.Context(), deployment.ID, buildResult.ImageName, buildResult.Log)
+	if result.BuildError != "" {
+		deployment, err = h.failBuild(deployment.ID, result.BuildLog, result.BuildError)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "record deployment build failure")
+			return
+		}
+		h.writeDeployment(w, http.StatusCreated, deployment)
+		return
+	}
+	deployment, err = h.repository.CompleteBuild(r.Context(), deployment.ID, result.ImageName, result.BuildLog)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "record deployment build")
 		return
@@ -125,13 +121,12 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeRepositoryError(w, err, "start deployment container")
 		return
 	}
-	if deployment.ImageName == nil {
-		writeError(w, http.StatusInternalServerError, "deployment image is missing")
-		return
-	}
-	container, startErr := h.containerManager.Start(r.Context(), deployment.ID, *deployment.ImageName, deployment.Version, h.containerLimits)
-	if startErr != nil {
-		deployment, err = h.failStart(deployment.ID, startErr.Error())
+	if result.StartError != "" || result.Container == nil {
+		startError := result.StartError
+		if startError == "" {
+			startError = "worker did not return a started container"
+		}
+		deployment, err = h.failStart(deployment.ID, startError)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "record deployment startup failure")
 			return
@@ -139,11 +134,11 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		h.writeDeployment(w, http.StatusCreated, deployment)
 		return
 	}
-	deployment, err = h.repository.CompleteStart(r.Context(), deployment.ID, container.ID, container.InternalPort, container.HostPort)
+	deployment, err = h.repository.CompleteStart(r.Context(), deployment.ID, result.Container.ID, result.Container.InternalPort, result.Container.HostPort)
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 		defer cancel()
-		_ = h.containerManager.Remove(cleanupCtx, container.ID)
+		_ = h.workerClient.Stop(cleanupCtx, result.Container.ID)
 		_, _ = h.repository.FailStart(cleanupCtx, deployment.ID, "container started but Launchpad could not record its startup")
 		writeRepositoryError(w, err, "record deployment startup")
 		return
@@ -201,7 +196,7 @@ func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if deployment.ContainerID != nil {
-		if err := h.containerManager.Remove(r.Context(), *deployment.ContainerID); err != nil {
+		if err := h.workerClient.Stop(r.Context(), *deployment.ContainerID); err != nil {
 			writeError(w, http.StatusInternalServerError, "stop deployment container")
 			return
 		}

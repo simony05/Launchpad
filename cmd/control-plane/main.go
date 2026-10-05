@@ -10,14 +10,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/simon/launchpad/internal/build"
 	"github.com/simon/launchpad/internal/config"
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/database"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/httpserver"
 	"github.com/simon/launchpad/internal/routing"
-	"github.com/simon/launchpad/internal/workspace"
+	"github.com/simon/launchpad/internal/worker"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -52,13 +51,15 @@ func main() {
 	}
 
 	deploymentRepository := deployments.NewPostgresRepository(pool)
-	sourceStore := workspace.NewLocalStore(cfg.WorkspaceRoot)
 	buildTimeout := time.Duration(cfg.BuildTimeoutSeconds) * time.Second
 	startTimeout := time.Duration(cfg.StartTimeoutSeconds) * time.Second
-	builder := build.NewDockerBuilder(cfg.WorkspaceRoot, buildTimeout)
-	containerManager := containers.NewDockerManager(startTimeout)
+	workerClient, err := worker.NewHTTPClient(cfg.WorkerURL, cfg.WorkerToken, buildTimeout+startTimeout)
+	if err != nil {
+		logger.Error("configure worker client", "error", err)
+		os.Exit(1)
+	}
 	applicationRouter := routing.New(deploymentRepository, cfg.RouterUpstreamHost, cfg.PublicBaseDomain, time.Duration(cfg.RouterCacheTTLSeconds)*time.Second)
-	server := httpserver.New(cfg.Address(), logger, deploymentRepository, sourceStore, builder, containerManager, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, applicationRouter, cfg.PublicBaseDomain, buildTimeout, startTimeout)
+	server := httpserver.New(cfg.Address(), logger, deploymentRepository, workerClient, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, applicationRouter, cfg.PublicBaseDomain, buildTimeout, startTimeout)
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())
