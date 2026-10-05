@@ -47,3 +47,38 @@ func TestRemoveTreatsMissingContainerAsStopped(t *testing.T) {
 		t.Fatalf("Remove() error = %v", err)
 	}
 }
+
+func TestResourceAvailability(t *testing.T) {
+	for _, test := range []struct {
+		name, limits string
+		cpu          float64
+		memory       int64
+	}{
+		{"limited", `{"NanoCpus":500000000,"Memory":256}`, 1.5, 768},
+		{"quota", `{"CpuQuota":100000,"CpuPeriod":100000,"Memory":512}`, 1, 512},
+		{"unlimited", `{}`, 0, 0},
+		{"overcommitted", `{"NanoCpus":4000000000,"Memory":2048}`, 0, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := NewDockerManager(time.Second)
+			m.run = func(_ context.Context, args ...string) (string, error) {
+				switch args[0] {
+				case "info":
+					return "2 1024 1", nil
+				case "ps":
+					return testContainerID, nil
+				case "inspect":
+					return test.limits, nil
+				}
+				return "", fmt.Errorf("unexpected command")
+			}
+			r, err := m.Resources(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.AvailableCPU != test.cpu || r.AvailableMemory != test.memory || r.ContainersRunning != 1 {
+				t.Fatalf("unexpected resources: %+v", r)
+			}
+		})
+	}
+}

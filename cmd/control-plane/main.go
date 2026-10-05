@@ -17,6 +17,7 @@ import (
 	"github.com/simon/launchpad/internal/httpserver"
 	"github.com/simon/launchpad/internal/routing"
 	"github.com/simon/launchpad/internal/worker"
+	"github.com/simon/launchpad/internal/workers"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -36,6 +37,11 @@ func main() {
 		Level: cfg.LogLevel,
 	}))
 	slog.SetDefault(logger)
+	registryCfg, err := config.LoadRegistry()
+	if err != nil {
+		logger.Error("invalid registry configuration", "error", err)
+		os.Exit(1)
+	}
 
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), startupTimeout)
 	defer cancelStartup()
@@ -71,11 +77,29 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	registryStore := workers.Postgres{Pool: pool}
+	registryServer := &http.Server{Addr: registryCfg.Address, Handler: workers.Handler(registryStore, cfg.WorkerToken), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	go func() {
+		logger.Info("worker registry listening", "address", registryCfg.Address)
+		if err := registryServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("worker registry failed", "error", err)
+			stop()
+		}
+	}()
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		workers.Monitor(ctx, registryStore, registryCfg.CheckInterval, registryCfg.Timeout, logger)
+	}()
 	<-ctx.Done()
+	<-monitorDone
 
 	logger.Info("control plane shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	if err := registryServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("registry shutdown failed", "error", err)
+	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)

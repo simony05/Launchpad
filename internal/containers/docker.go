@@ -3,8 +3,10 @@ package containers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -42,6 +44,8 @@ type Status struct {
 
 // Resources is the subset of Docker host capacity needed by the first worker.
 type Resources struct {
+	AvailableCPU      float64
+	AvailableMemory   int64
 	CPUs              int
 	MemoryBytes       int64
 	ContainersRunning int
@@ -166,7 +170,46 @@ func (m *DockerManager) Resources(ctx context.Context) (Resources, error) {
 	if cpuErr != nil || memoryErr != nil || runningErr != nil || cpus < 1 || memoryBytes < 1 || running < 0 {
 		return Resources{}, errors.New("Docker returned invalid resource information")
 	}
-	return Resources{CPUs: cpus, MemoryBytes: memoryBytes, ContainersRunning: running}, nil
+	ids, err := m.run(resourcesCtx, "ps", "--quiet", "--no-trunc")
+	if err != nil {
+		return Resources{}, commandError(resourcesCtx, "list running containers", ids, err)
+	}
+	availableCPU, availableMemory := float64(cpus), memoryBytes
+	containerIDs := strings.Fields(ids)
+	for _, id := range containerIDs {
+		if !containerIDPattern.MatchString(id) {
+			return Resources{}, errors.New("invalid container ID in resource sample")
+		}
+		output, err := m.run(resourcesCtx, "inspect", "--format", "{{json .HostConfig}}", id)
+		if err != nil {
+			return Resources{}, commandError(resourcesCtx, "inspect resource limits", output, err)
+		}
+		var limits struct {
+			NanoCpus  int64
+			CpuQuota  int64
+			CpuPeriod int64
+			Memory    int64
+		}
+		if err := json.Unmarshal([]byte(output), &limits); err != nil {
+			return Resources{}, err
+		}
+		cpu := float64(limits.NanoCpus) / 1e9
+		if cpu == 0 && limits.CpuQuota > 0 && limits.CpuPeriod > 0 {
+			cpu = float64(limits.CpuQuota) / float64(limits.CpuPeriod)
+		}
+		// An unlimited container can consume the whole host; do not advertise it as free.
+		if cpu <= 0 {
+			availableCPU = 0
+		} else {
+			availableCPU -= cpu
+		}
+		if limits.Memory <= 0 {
+			availableMemory = 0
+		} else {
+			availableMemory -= limits.Memory
+		}
+	}
+	return Resources{CPUs: cpus, MemoryBytes: memoryBytes, ContainersRunning: len(containerIDs), AvailableCPU: math.Max(0, availableCPU), AvailableMemory: max(0, availableMemory)}, nil
 }
 
 func (m *DockerManager) remove(ctx context.Context, containerID string) error {
