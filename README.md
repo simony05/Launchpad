@@ -1,5 +1,8 @@
 # Launchpad
 
+Milestone 12: [private cross-worker routing](docs/private-routing.md) adds live
+route verification and requires `LAUNCHPAD_APP_BIND_IP` on each worker.
+
 Milestone 11: see [multi-worker scheduling](docs/multi-worker.md) for the current
 control-plane plus two-worker configuration. See also
 [worker registration and heartbeats](docs/worker-heartbeats.md).

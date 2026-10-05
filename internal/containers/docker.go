@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -63,15 +64,24 @@ type commandRunner func(context.Context, ...string) (string, error)
 
 // DockerManager manages generated application containers through the Docker CLI.
 type DockerManager struct {
+	bindIP  string
 	timeout time.Duration
 	run     commandRunner
 }
 
-func NewDockerManager(timeout time.Duration) *DockerManager {
-	return &DockerManager{timeout: timeout, run: runDocker}
+func NewDockerManager(timeout time.Duration, bindIP ...string) *DockerManager {
+	ip := "127.0.0.1"
+	if len(bindIP) > 0 {
+		ip = bindIP[0]
+	}
+	return &DockerManager{timeout: timeout, run: runDocker, bindIP: ip}
 }
 
 func (m *DockerManager) Start(ctx context.Context, deploymentID, imageName string, version int, limits Limits) (Container, error) {
+	ip := net.ParseIP(m.bindIP)
+	if ip == nil || (!ip.IsPrivate() && !ip.IsLoopback()) {
+		return Container{}, errors.New("application bind IP must be private or loopback")
+	}
 	if _, err := uuid.Parse(deploymentID); err != nil {
 		return Container{}, errors.New("deployment id must be a UUID")
 	}
@@ -85,7 +95,7 @@ func (m *DockerManager) Start(ctx context.Context, deploymentID, imageName strin
 	output, err := m.run(startCtx,
 		"run", "--detach",
 		"--name", containerName,
-		"--publish", "0:8000",
+		"--publish", net.JoinHostPort(m.bindIP, "0")+":8000",
 		"--cpus", limits.CPUs,
 		"--memory", limits.Memory,
 		imageName,
@@ -135,22 +145,36 @@ func (m *DockerManager) Status(ctx context.Context, deploymentID string, version
 	statusCtx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
 	containerName := fmt.Sprintf("launchpad-%s-v%d", deploymentID, version)
-	output, err := m.run(statusCtx, "inspect", "--format", "{{.State.Running}} {{.Id}} {{(index (index .NetworkSettings.Ports \"8000/tcp\") 0).HostPort}}", containerName)
+	output, err := m.run(statusCtx, "inspect", containerName)
 	if err != nil {
-		if strings.Contains(output, "No such object") {
+		if strings.Contains(output, "No such object") || strings.Contains(output, "No such container") {
 			return Status{}, nil
 		}
 		return Status{}, commandError(statusCtx, "inspect container", output, err)
 	}
-	fields := strings.Fields(output)
-	if len(fields) != 3 {
+	var records []struct {
+		ID              string `json:"Id"`
+		State           struct{ Running bool }
+		NetworkSettings struct {
+			Ports map[string][]struct{ HostPort string }
+		}
+	}
+	if err := json.Unmarshal([]byte(output), &records); err != nil || len(records) != 1 {
 		return Status{}, errors.New("Docker returned an invalid container status")
 	}
-	hostPort, err := strconv.Atoi(fields[2])
+	record := records[0]
+	if !record.State.Running {
+		return Status{ContainerID: record.ID}, nil
+	}
+	ports := record.NetworkSettings.Ports["8000/tcp"]
+	if len(ports) == 0 || !containerIDPattern.MatchString(record.ID) {
+		return Status{}, errors.New("Docker returned an invalid container status")
+	}
+	hostPort, err := strconv.Atoi(ports[0].HostPort)
 	if err != nil || hostPort < 1 || hostPort > 65535 {
 		return Status{}, errors.New("Docker returned an invalid host port")
 	}
-	return Status{Running: fields[0] == "true", ContainerID: fields[1], HostPort: hostPort}, nil
+	return Status{Running: true, ContainerID: record.ID, HostPort: hostPort}, nil
 }
 
 func (m *DockerManager) Resources(ctx context.Context) (Resources, error) {

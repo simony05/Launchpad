@@ -119,6 +119,7 @@ func Load() (Config, error) {
 
 // WorkerConfig contains the worker-only settings. It has no database access.
 type WorkerConfig struct {
+	AppBindIP           string
 	Host                string
 	Port                int
 	LogLevel            slog.Level
@@ -130,6 +131,10 @@ type WorkerConfig struct {
 
 func LoadWorker() (WorkerConfig, error) {
 	cfg := WorkerConfig{Host: envOrDefault("LAUNCHPAD_WORKER_HOST", defaultHost), Port: defaultWorkerPort, LogLevel: defaultLogLevel, WorkspaceRoot: os.Getenv("LAUNCHPAD_WORKSPACE_ROOT"), BuildTimeoutSeconds: defaultBuildTimeout, StartTimeoutSeconds: defaultStartTimeout, WorkerToken: os.Getenv("LAUNCHPAD_WORKER_TOKEN")}
+	cfg.AppBindIP = os.Getenv("LAUNCHPAD_APP_BIND_IP")
+	if ip := net.ParseIP(cfg.AppBindIP); ip == nil || !ip.IsPrivate() || ip.To4() == nil {
+		return WorkerConfig{}, fmt.Errorf("LAUNCHPAD_APP_BIND_IP must be the worker EC2 private IPv4 address")
+	}
 	if cfg.WorkspaceRoot == "" || !filepath.IsAbs(cfg.WorkspaceRoot) {
 		return WorkerConfig{}, fmt.Errorf("LAUNCHPAD_WORKSPACE_ROOT must be an absolute path")
 	}

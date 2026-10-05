@@ -53,6 +53,13 @@ type Store interface {
 }
 type Postgres struct{ Pool *pgxpool.Pool }
 
+func (p Postgres) Get(ctx context.Context, id string) (Worker, error) {
+	var w Worker
+	err := p.Pool.QueryRow(ctx, `SELECT id::text,hostname,address,status,last_heartbeat FROM workers WHERE id=$1`, id).Scan(&w.ID, &w.Hostname, &w.Address, &w.Status, &w.LastHeartbeat)
+	w.Healthy = w.Status == "HEALTHY"
+	return w, err
+}
+
 // Registration and heartbeat share an atomic upsert, making retries and restarts safe.
 func (p Postgres) Record(ctx context.Context, r Report) error {
 	status := "UNHEALTHY"

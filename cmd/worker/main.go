@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,7 +31,12 @@ func main() {
 		logger.Error("invalid heartbeat configuration", "error", err)
 		os.Exit(1)
 	}
-	server := worker.NewServer(cfg.Address(), cfg.WorkerToken, logger, workspace.NewLocalStore(cfg.WorkspaceRoot), build.NewDockerBuilder(cfg.WorkspaceRoot, time.Duration(cfg.BuildTimeoutSeconds)*time.Second), containers.NewDockerManager(time.Duration(cfg.StartTimeoutSeconds)*time.Second))
+	advertised, _ := url.Parse(heartbeatCfg.Address)
+	if advertised.Hostname() != cfg.AppBindIP {
+		logger.Error("LAUNCHPAD_APP_BIND_IP must match the private IP in LAUNCHPAD_WORKER_ADVERTISE_URL")
+		os.Exit(1)
+	}
+	server := worker.NewServer(cfg.Address(), cfg.WorkerToken, logger, workspace.NewLocalStore(cfg.WorkspaceRoot), build.NewDockerBuilder(cfg.WorkspaceRoot, time.Duration(cfg.BuildTimeoutSeconds)*time.Second), containers.NewDockerManager(time.Duration(cfg.StartTimeoutSeconds)*time.Second, cfg.AppBindIP))
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("worker stopped unexpectedly", "error", err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -35,6 +36,7 @@ type ApplicationRouter interface {
 }
 
 type cacheEntry struct {
+	err      error
 	host     string
 	hostPort int
 	expires  time.Time
@@ -48,9 +50,11 @@ type Router struct {
 	publicBaseDomain string
 	cacheTTL         time.Duration
 
-	mu    sync.RWMutex
-	cache map[string]cacheEntry
-	now   func() time.Time
+	mu        sync.RWMutex
+	cache     map[string]cacheEntry
+	now       func() time.Time
+	lookups   [64]sync.Mutex
+	transport *http.Transport
 }
 
 func New(resolver Resolver, upstreamHost, publicBaseDomain string, cacheTTL time.Duration) *Router {
@@ -61,6 +65,7 @@ func New(resolver Resolver, upstreamHost, publicBaseDomain string, cacheTTL time
 		cacheTTL:         cacheTTL,
 		cache:            make(map[string]cacheEntry),
 		now:              time.Now,
+		transport:        &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).DialContext, ResponseHeaderTimeout: 10 * time.Second, IdleConnTimeout: 60 * time.Second, MaxIdleConns: 100, MaxIdleConnsPerHost: 10},
 	}
 }
 
@@ -92,8 +97,8 @@ func (r *Router) AllowsHost(ctx context.Context, host string) bool {
 	if !ok {
 		return false
 	}
-	deployment, err := r.resolver.GetByPublicIdentifier(ctx, publicIdentifier)
-	return err == nil && deployment.Status == deployments.StatusRunning && deployment.HostPort != nil
+	_, err := r.resolve(ctx, publicIdentifier)
+	return err == nil
 }
 
 func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdentifier, path, rawPath string) {
@@ -117,6 +122,7 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 		Host:   net.JoinHostPort(location.host, strconv.Itoa(location.hostPort)),
 	}
 	proxy := &httputil.ReverseProxy{
+		Transport: r.transport,
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
 			proxyRequest.SetURL(target)
 			proxyRequest.Out.URL.Path = path
@@ -124,6 +130,7 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 			proxyRequest.SetXForwarded()
 		},
 		ErrorHandler: func(response http.ResponseWriter, _ *http.Request, _ error) {
+			r.Invalidate(publicIdentifier)
 			writeError(response, http.StatusBadGateway, "application upstream is unavailable")
 		},
 	}
@@ -132,20 +139,63 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 
 // Invalidate removes a location cache entry after a deployment changes state.
 func (r *Router) Invalidate(publicIdentifier string) {
+	lock := r.lookupLock(publicIdentifier)
+	lock.Lock()
+	defer lock.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.cache, publicIdentifier)
 }
 
+func (r *Router) lookupLock(id string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return &r.lookups[h.Sum32()%uint32(len(r.lookups))]
+}
+
 func (r *Router) resolve(ctx context.Context, publicIdentifier string) (cacheEntry, error) {
+	// Striped locks coalesce concurrent misses and serialize invalidation with
+	// in-flight lookups without an unbounded per-identifier lock map.
+	lock := r.lookupLock(publicIdentifier)
+	lock.Lock()
+	defer lock.Unlock()
 	now := r.now()
 	r.mu.RLock()
 	entry, ok := r.cache[publicIdentifier]
 	r.mu.RUnlock()
 	if ok && now.Before(entry.expires) {
-		return entry, nil
+		return entry, entry.err
 	}
+	entry, err := r.load(ctx, publicIdentifier)
+	if ctx.Err() != nil {
+		return cacheEntry{}, ctx.Err()
+	}
+	ttl := r.cacheTTL
+	if err != nil {
+		ttl = time.Second
+	}
+	entry.expires = r.now().Add(ttl)
+	entry.err = err
+	r.mu.Lock()
+	if len(r.cache) >= 1024 {
+		for key, value := range r.cache {
+			if !r.now().Before(value.expires) {
+				delete(r.cache, key)
+			}
+		}
+		if len(r.cache) >= 1024 {
+			for key := range r.cache {
+				delete(r.cache, key)
+				break
+			}
+		}
+	}
+	r.cache[publicIdentifier] = entry
+	r.mu.Unlock()
+	return entry, err
+}
 
+func (r *Router) load(ctx context.Context, publicIdentifier string) (cacheEntry, error) {
 	deployment, err := r.resolver.GetByPublicIdentifier(ctx, publicIdentifier)
 	if err != nil {
 		return cacheEntry{}, err
@@ -164,12 +214,10 @@ func (r *Router) resolve(ctx context.Context, publicIdentifier string) (cacheEnt
 	if host == "" {
 		return cacheEntry{}, errors.New("deployment has no worker location")
 	}
-	entry = cacheEntry{host: host, hostPort: *deployment.HostPort, expires: now.Add(r.cacheTTL)}
-
-	r.mu.Lock()
-	r.cache[publicIdentifier] = entry
-	r.mu.Unlock()
-	return entry, nil
+	if *deployment.HostPort < 1 || *deployment.HostPort > 65535 {
+		return cacheEntry{}, errors.New("invalid application port")
+	}
+	return cacheEntry{host: host, hostPort: *deployment.HostPort}, nil
 }
 
 func applicationPath(request *http.Request, publicIdentifier string) (string, string) {

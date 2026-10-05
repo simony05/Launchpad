@@ -11,7 +11,7 @@ const testDeploymentID = "8bb34af2-396c-4b37-8905-1b93c6677a1d"
 const testContainerID = "ab12cd34ef56"
 
 func TestStartRecordsDockerAssignedPort(t *testing.T) {
-	manager := NewDockerManager(time.Second)
+	manager := NewDockerManager(time.Second, "10.0.0.2")
 	var calls [][]string
 	manager.run = func(_ context.Context, args ...string) (string, error) {
 		calls = append(calls, args)
@@ -34,6 +34,31 @@ func TestStartRecordsDockerAssignedPort(t *testing.T) {
 	}
 	if len(calls) != 2 || calls[0][0] != "run" || calls[1][0] != "inspect" {
 		t.Fatalf("calls = %#v", calls)
+	}
+	if calls[0][5] != "10.0.0.2:0:8000" {
+		t.Fatalf("not private bind: %v", calls[0])
+	}
+}
+
+func TestStoppedContainerStatusWithoutPortMapping(t *testing.T) {
+	manager := NewDockerManager(time.Second)
+	manager.run = func(context.Context, ...string) (string, error) {
+		return `[{"Id":"ab12cd34ef56","State":{"Running":false},"NetworkSettings":{"Ports":{"8000/tcp":null}}}]`, nil
+	}
+	status, err := manager.Status(context.Background(), testDeploymentID, 1)
+	if err != nil || status.Running {
+		t.Fatalf("%+v %v", status, err)
+	}
+}
+
+func TestRunningContainerStatus(t *testing.T) {
+	manager := NewDockerManager(time.Second)
+	manager.run = func(context.Context, ...string) (string, error) {
+		return `[{"Id":"ab12cd34ef56","State":{"Running":true},"NetworkSettings":{"Ports":{"8000/tcp":[{"HostPort":"32781"}]}}}]`, nil
+	}
+	status, err := manager.Status(context.Background(), testDeploymentID, 1)
+	if err != nil || !status.Running || status.HostPort != 32781 {
+		t.Fatalf("%+v %v", status, err)
 	}
 }
 

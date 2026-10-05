@@ -68,7 +68,10 @@ func main() {
 		logger.Error("configure worker client", "error", err)
 		os.Exit(1)
 	}
-	applicationRouter := routing.New(deploymentRepository, cfg.RouterUpstreamHost, cfg.PublicBaseDomain, time.Duration(cfg.RouterCacheTTLSeconds)*time.Second)
+	verifiedResolver := routing.VerifiedResolver{Deployments: deploymentRepository, Workers: workers.Postgres{Pool: pool}, HeartbeatTimeout: registryCfg.Timeout, LegacyAddress: cfg.WorkerURL, Client: func(address string) (worker.Client, error) {
+		return worker.NewHTTPClient(address, cfg.WorkerToken, 3*time.Second)
+	}}
+	applicationRouter := routing.New(verifiedResolver, cfg.RouterUpstreamHost, cfg.PublicBaseDomain, time.Duration(cfg.RouterCacheTTLSeconds)*time.Second)
 	placement := httpserver.Placement{Scheduler: scheduler.Postgres{Pool: pool, HeartbeatTimeout: registryCfg.Timeout}, Client: func(address string) (worker.Client, error) {
 		return worker.NewHTTPClient(address, cfg.WorkerToken, buildTimeout+startTimeout)
 	}}
