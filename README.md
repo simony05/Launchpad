@@ -1,7 +1,9 @@
 # Launchpad
 
-Milestone 10: see [worker registration and heartbeats](docs/worker-heartbeats.md)
-for the current two-instance configuration. The earlier single-host commands
+Milestone 11: see [multi-worker scheduling](docs/multi-worker.md) for the current
+control-plane plus two-worker configuration. See also
+[worker registration and heartbeats](docs/worker-heartbeats.md).
+The earlier single-host commands
 below are historical; the control plane must not mount the Docker socket.
 
 Launchpad is an agent-native deployment runtime for AI-generated prototypes.

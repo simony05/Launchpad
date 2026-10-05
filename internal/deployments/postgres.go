@@ -12,7 +12,7 @@ import (
 
 const deploymentColumns = `
 	id::text, name, status::text, runtime, version, created_at, updated_at,
-	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error`
+	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error, worker_id::text, worker_address`
 
 // PostgresRepository stores deployment metadata in PostgreSQL.
 type PostgresRepository struct {
@@ -192,6 +192,8 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		&buildLog,
 		&buildError,
 		&startError,
+		&deployment.WorkerID,
+		&deployment.WorkerAddress,
 	)
 	if err != nil {
 		return Deployment{}, err

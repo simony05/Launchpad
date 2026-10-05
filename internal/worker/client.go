@@ -28,7 +28,7 @@ func NewHTTPClient(baseURL, token string, timeout time.Duration) (*HTTPClient, e
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("worker token must not be empty")
 	}
-	return &HTTPClient{baseURL: strings.TrimSuffix(baseURL, "/"), token: token, client: &http.Client{Timeout: timeout}}, nil
+	return &HTTPClient{baseURL: strings.TrimSuffix(baseURL, "/"), token: token, client: &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 func (c *HTTPClient) Start(ctx context.Context, input StartRequest) (StartResult, error) {

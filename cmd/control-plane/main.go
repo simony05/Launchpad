@@ -16,6 +16,7 @@ import (
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/httpserver"
 	"github.com/simon/launchpad/internal/routing"
+	"github.com/simon/launchpad/internal/scheduler"
 	"github.com/simon/launchpad/internal/worker"
 	"github.com/simon/launchpad/internal/workers"
 )
@@ -59,13 +60,19 @@ func main() {
 	deploymentRepository := deployments.NewPostgresRepository(pool)
 	buildTimeout := time.Duration(cfg.BuildTimeoutSeconds) * time.Second
 	startTimeout := time.Duration(cfg.StartTimeoutSeconds) * time.Second
-	workerClient, err := worker.NewHTTPClient(cfg.WorkerURL, cfg.WorkerToken, buildTimeout+startTimeout)
+	var workerClient worker.Client
+	if cfg.WorkerURL != "" {
+		workerClient, err = worker.NewHTTPClient(cfg.WorkerURL, cfg.WorkerToken, buildTimeout+startTimeout)
+	}
 	if err != nil {
 		logger.Error("configure worker client", "error", err)
 		os.Exit(1)
 	}
 	applicationRouter := routing.New(deploymentRepository, cfg.RouterUpstreamHost, cfg.PublicBaseDomain, time.Duration(cfg.RouterCacheTTLSeconds)*time.Second)
-	server := httpserver.New(cfg.Address(), logger, deploymentRepository, workerClient, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, applicationRouter, cfg.PublicBaseDomain, buildTimeout, startTimeout)
+	placement := httpserver.Placement{Scheduler: scheduler.Postgres{Pool: pool, HeartbeatTimeout: registryCfg.Timeout}, Client: func(address string) (worker.Client, error) {
+		return worker.NewHTTPClient(address, cfg.WorkerToken, buildTimeout+startTimeout)
+	}}
+	server := httpserver.New(cfg.Address(), logger, deploymentRepository, workerClient, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, applicationRouter, cfg.PublicBaseDomain, buildTimeout, startTimeout, placement)
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())

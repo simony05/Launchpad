@@ -14,6 +14,7 @@ import (
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/routing"
+	"github.com/simon/launchpad/internal/scheduler"
 	"github.com/simon/launchpad/internal/worker"
 	"github.com/simon/launchpad/internal/workspace"
 )
@@ -28,10 +29,13 @@ const (
 )
 
 // New creates the Launchpad control-plane HTTP server.
-func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, workerClient worker.Client, containerLimits containers.Limits, applicationRouter routing.ApplicationRouter, publicBaseDomain string, buildTimeout, startTimeout time.Duration) *http.Server {
+func New(address string, logger *slog.Logger, deploymentRepository deployments.Repository, workerClient worker.Client, containerLimits containers.Limits, applicationRouter routing.ApplicationRouter, publicBaseDomain string, buildTimeout, startTimeout time.Duration, placement ...Placement) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	deploymentHandler := deploymentHandler{repository: deploymentRepository, workerClient: workerClient, containerLimits: containerLimits, applicationRouter: applicationRouter, publicBaseDomain: publicBaseDomain}
+	if len(placement) > 0 {
+		deploymentHandler.placement = &placement[0]
+	}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
@@ -57,11 +61,40 @@ func health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type deploymentHandler struct {
+	placement         *Placement
 	repository        deployments.Repository
 	workerClient      worker.Client
 	containerLimits   containers.Limits
 	applicationRouter routing.ApplicationRouter
 	publicBaseDomain  string
+}
+
+// Placement supplies scheduling and per-worker clients. The legacy client is
+// retained only for deployments created before worker assignments existed.
+type Placement struct {
+	Scheduler scheduler.Scheduler
+	Client    func(string) (worker.Client, error)
+}
+
+func (h deploymentHandler) clientFor(d deployments.Deployment) (worker.Client, error) {
+	if d.WorkerAddress != nil && h.placement != nil {
+		return h.placement.Client(*d.WorkerAddress)
+	}
+	if h.workerClient != nil {
+		return h.workerClient, nil
+	}
+	return nil, errors.New("deployment has no worker assignment; configure legacy worker for pre-migration deployments")
+}
+
+func (h deploymentHandler) release(id string) {
+	if h.placement == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := h.placement.Scheduler.Release(ctx, id); err != nil {
+		slog.Error("release worker reservation", "deployment_id", id, "error", err)
+	}
 }
 
 type createDeploymentRequest struct {
@@ -85,13 +118,44 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "create deployment")
 		return
 	}
+	deploymentID := deployment.ID
 	deployment, err = h.repository.MarkBuilding(r.Context(), deployment.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "start deployment build")
 		return
 	}
 
-	result, workerErr := h.workerClient.Start(r.Context(), worker.StartRequest{DeploymentID: deployment.ID, Version: deployment.Version, Files: request.Files, Limits: h.containerLimits})
+	if h.placement != nil {
+		assignment, scheduleErr := h.placement.Scheduler.Reserve(r.Context(), deployment.ID, h.containerLimits)
+		if scheduleErr != nil {
+			message := "worker scheduling failed"
+			status := http.StatusInternalServerError
+			if errors.Is(scheduleErr, scheduler.ErrNoCapacity) {
+				message = scheduler.ErrNoCapacity.Error()
+				status = http.StatusServiceUnavailable
+			}
+			if _, err := h.failBuild(deployment.ID, "", message); err != nil {
+				writeError(w, 500, "record scheduling failure")
+				return
+			}
+			writeJSON(w, status, map[string]string{"error": message, "deployment_id": deployment.ID})
+			return
+		}
+		deployment.WorkerID = &assignment.WorkerID
+		deployment.WorkerAddress = &assignment.Address
+	}
+	client, err := h.clientFor(deployment)
+	if err != nil {
+		h.release(deployment.ID)
+		_, _ = h.failBuild(deployment.ID, "", err.Error())
+		writeError(w, 503, "worker client unavailable")
+		return
+	}
+	result, workerErr := client.Start(r.Context(), worker.StartRequest{DeploymentID: deployment.ID, Version: deployment.Version, Files: request.Files, Limits: h.containerLimits})
+	// Persist the result even if the caller disconnected while the worker replied.
+	resultCtx, cancelResult := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelResult()
+	r = r.WithContext(resultCtx)
 	if workerErr != nil {
 		deployment, err = h.failBuild(deployment.ID, "", workerErr.Error())
 		if err != nil {
@@ -103,6 +167,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.BuildError != "" {
+		h.release(deployment.ID)
 		deployment, err = h.failBuild(deployment.ID, result.BuildLog, result.BuildError)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "record deployment build failure")
@@ -113,11 +178,21 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	deployment, err = h.repository.CompleteBuild(r.Context(), deployment.ID, result.ImageName, result.BuildLog)
 	if err != nil {
+		if result.Container != nil {
+			if stopErr := client.Stop(r.Context(), result.Container.ID); stopErr == nil {
+				h.release(deploymentID)
+			}
+		}
 		writeError(w, http.StatusInternalServerError, "record deployment build")
 		return
 	}
 	deployment, err = h.repository.MarkStarting(r.Context(), deployment.ID)
 	if err != nil {
+		if result.Container != nil {
+			if stopErr := client.Stop(r.Context(), result.Container.ID); stopErr == nil {
+				h.release(deploymentID)
+			}
+		}
 		writeRepositoryError(w, err, "start deployment container")
 		return
 	}
@@ -138,8 +213,10 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 		defer cancel()
-		_ = h.workerClient.Stop(cleanupCtx, result.Container.ID)
-		_, _ = h.repository.FailStart(cleanupCtx, deployment.ID, "container started but Launchpad could not record its startup")
+		if err := client.Stop(cleanupCtx, result.Container.ID); err == nil {
+			h.release(deploymentID)
+		}
+		_, _ = h.repository.FailStart(cleanupCtx, deploymentID, "container started but Launchpad could not record its startup")
 		writeRepositoryError(w, err, "record deployment startup")
 		return
 	}
@@ -195,11 +272,21 @@ func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "get deployment")
 		return
 	}
+	if deployment.Status == deployments.StatusBuilding || deployment.Status == deployments.StatusStarting || deployment.Status == deployments.StatusReadyToStart {
+		writeError(w, http.StatusConflict, "deployment is busy")
+		return
+	}
 	if deployment.ContainerID != nil {
-		if err := h.workerClient.Stop(r.Context(), *deployment.ContainerID); err != nil {
+		client, err := h.clientFor(deployment)
+		if err != nil {
+			writeError(w, 503, "assigned worker unavailable")
+			return
+		}
+		if err := client.Stop(r.Context(), *deployment.ContainerID); err != nil {
 			writeError(w, http.StatusInternalServerError, "stop deployment container")
 			return
 		}
+		h.release(deployment.ID)
 	}
 
 	deployment, err = h.repository.MarkStopped(r.Context(), deployment.ID)

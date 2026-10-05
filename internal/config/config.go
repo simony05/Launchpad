@@ -20,7 +20,7 @@ const (
 	defaultStartTimeout       = 30
 	defaultAppCPUs            = "0.5"
 	defaultAppMemory          = "256m"
-	defaultRouterUpstreamHost = "host.docker.internal"
+	defaultRouterUpstreamHost = ""
 	defaultRouterCacheTTL     = 5
 )
 
@@ -81,14 +81,11 @@ func Load() (Config, error) {
 	if !memoryPattern.MatchString(cfg.AppMemory) {
 		return Config{}, fmt.Errorf("LAUNCHPAD_APP_MEMORY must be a whole number followed by m or g")
 	}
-	if !hostnamePattern.MatchString(cfg.RouterUpstreamHost) {
+	if cfg.RouterUpstreamHost != "" && !hostnamePattern.MatchString(cfg.RouterUpstreamHost) {
 		return Config{}, fmt.Errorf("LAUNCHPAD_ROUTER_UPSTREAM_HOST must be a hostname or IPv4 address without a port")
 	}
 	if !domainPattern.MatchString(cfg.PublicBaseDomain) {
 		return Config{}, fmt.Errorf("LAUNCHPAD_PUBLIC_BASE_DOMAIN must be a domain such as apps.example.com")
-	}
-	if cfg.WorkerURL == "" {
-		return Config{}, fmt.Errorf("LAUNCHPAD_WORKER_URL must be set")
 	}
 	if cfg.WorkerToken == "" {
 		return Config{}, fmt.Errorf("LAUNCHPAD_WORKER_TOKEN must be set")

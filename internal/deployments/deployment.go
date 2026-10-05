@@ -17,6 +17,8 @@ const (
 
 // Deployment is Launchpad's metadata record for an application deployment.
 type Deployment struct {
+	WorkerID         *string   `json:"worker_id"`
+	WorkerAddress    *string   `json:"worker_address"`
 	ID               string    `json:"id"`
 	Name             string    `json:"name"`
 	Status           Status    `json:"status"`

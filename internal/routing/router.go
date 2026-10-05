@@ -35,6 +35,7 @@ type ApplicationRouter interface {
 }
 
 type cacheEntry struct {
+	host     string
 	hostPort int
 	expires  time.Time
 }
@@ -101,7 +102,7 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 		return
 	}
 
-	hostPort, err := r.resolve(request.Context(), publicIdentifier)
+	location, err := r.resolve(request.Context(), publicIdentifier)
 	if errors.Is(err, deployments.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "application not found")
 		return
@@ -113,7 +114,7 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 
 	target := &url.URL{
 		Scheme: "http",
-		Host:   net.JoinHostPort(r.upstreamHost, strconv.Itoa(hostPort)),
+		Host:   net.JoinHostPort(location.host, strconv.Itoa(location.hostPort)),
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
@@ -136,27 +137,39 @@ func (r *Router) Invalidate(publicIdentifier string) {
 	delete(r.cache, publicIdentifier)
 }
 
-func (r *Router) resolve(ctx context.Context, publicIdentifier string) (int, error) {
+func (r *Router) resolve(ctx context.Context, publicIdentifier string) (cacheEntry, error) {
 	now := r.now()
 	r.mu.RLock()
 	entry, ok := r.cache[publicIdentifier]
 	r.mu.RUnlock()
 	if ok && now.Before(entry.expires) {
-		return entry.hostPort, nil
+		return entry, nil
 	}
 
 	deployment, err := r.resolver.GetByPublicIdentifier(ctx, publicIdentifier)
 	if err != nil {
-		return 0, err
+		return cacheEntry{}, err
 	}
 	if deployment.Status != deployments.StatusRunning || deployment.HostPort == nil {
-		return 0, errors.New("deployment is not running")
+		return cacheEntry{}, errors.New("deployment is not running")
 	}
+	host := r.upstreamHost
+	if deployment.WorkerAddress != nil {
+		u, err := url.Parse(*deployment.WorkerAddress)
+		if err != nil || u.Scheme != "http" || u.Hostname() == "" {
+			return cacheEntry{}, errors.New("invalid worker address")
+		}
+		host = u.Hostname()
+	}
+	if host == "" {
+		return cacheEntry{}, errors.New("deployment has no worker location")
+	}
+	entry = cacheEntry{host: host, hostPort: *deployment.HostPort, expires: now.Add(r.cacheTTL)}
 
 	r.mu.Lock()
-	r.cache[publicIdentifier] = cacheEntry{hostPort: *deployment.HostPort, expires: now.Add(r.cacheTTL)}
+	r.cache[publicIdentifier] = entry
 	r.mu.Unlock()
-	return *deployment.HostPort, nil
+	return entry, nil
 }
 
 func applicationPath(request *http.Request, publicIdentifier string) (string, string) {

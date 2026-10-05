@@ -111,3 +111,24 @@ func backendPort(t *testing.T, backendURL string) int {
 	}
 	return value
 }
+
+func TestAssignedWorkerOverridesLegacyHostAndCachesLocation(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("assigned worker")) }))
+	defer backend.Close()
+	port := backendPort(t, backend.URL)
+	address := "http://127.0.0.1:8090"
+	resolver := &memoryResolver{deployment: deployments.Deployment{Status: deployments.StatusRunning, HostPort: &port, WorkerAddress: &address}}
+	router := New(resolver, "192.0.2.1", "apps.example.com", time.Minute)
+	for i := 0; i < 2; i++ {
+		request := httptest.NewRequest("GET", "/", nil)
+		request.Host = publicIdentifier + ".apps.example.com"
+		response := httptest.NewRecorder()
+		router.ServeHostHTTP(response, request)
+		if response.Code != 200 || response.Body.String() != "assigned worker" {
+			t.Fatalf("%d %s", response.Code, response.Body.String())
+		}
+	}
+	if router.cache[publicIdentifier].host != "127.0.0.1" {
+		t.Fatal("cache omitted worker host")
+	}
+}
