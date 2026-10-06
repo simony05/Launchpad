@@ -38,6 +38,9 @@ type Container struct {
 
 // Status is the observed state of a generated application container.
 type Status struct {
+	ExitCode    int
+	OOMKilled   bool
+	Error       string
 	Running     bool
 	ContainerID string
 	HostPort    int
@@ -153,8 +156,13 @@ func (m *DockerManager) Status(ctx context.Context, deploymentID string, version
 		return Status{}, commandError(statusCtx, "inspect container", output, err)
 	}
 	var records []struct {
-		ID              string `json:"Id"`
-		State           struct{ Running bool }
+		ID    string `json:"Id"`
+		State struct {
+			Running   bool
+			ExitCode  int
+			OOMKilled bool
+			Error     string
+		}
 		NetworkSettings struct {
 			Ports map[string][]struct{ HostPort string }
 		}
@@ -164,7 +172,7 @@ func (m *DockerManager) Status(ctx context.Context, deploymentID string, version
 	}
 	record := records[0]
 	if !record.State.Running {
-		return Status{ContainerID: record.ID}, nil
+		return Status{ContainerID: record.ID, ExitCode: record.State.ExitCode, OOMKilled: record.State.OOMKilled, Error: record.State.Error}, nil
 	}
 	ports := record.NetworkSettings.Ports["8000/tcp"]
 	if len(ports) == 0 || !containerIDPattern.MatchString(record.ID) {

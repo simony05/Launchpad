@@ -93,8 +93,11 @@ func (p Postgres) List(ctx context.Context) ([]Worker, error) {
 	return result, rows.Err()
 }
 
-func Handler(store Store, token string) http.Handler {
+func Handler(store Store, token string, applications ...Applications) http.Handler {
 	mux := http.NewServeMux()
+	if len(applications) > 0 {
+		applications[0].routes(mux)
+	}
 	record := func(w http.ResponseWriter, r *http.Request) {
 		var report Report
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))

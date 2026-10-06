@@ -26,6 +26,11 @@ func main() {
 		os.Exit(1)
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	recoveryCfg, err := config.LoadRecovery()
+	if err != nil {
+		logger.Error("invalid recovery configuration", "error", err)
+		os.Exit(1)
+	}
 	heartbeatCfg, err := config.LoadHeartbeat()
 	if err != nil {
 		logger.Error("invalid heartbeat configuration", "error", err)
@@ -45,6 +50,12 @@ func main() {
 	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		monitor := worker.ApplicationMonitor{Manager: containers.NewDockerManager(5*time.Second, cfg.AppBindIP), RegistryURL: heartbeatCfg.ControlPlaneURL, WorkerID: heartbeatCfg.ID, Token: cfg.WorkerToken, AppHost: cfg.AppBindIP, Logger: logger, Client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+		monitor.Run(ctx, recoveryCfg.Interval)
+	}()
 	heartbeatDone := make(chan struct{})
 	go func() {
 		defer close(heartbeatDone)
@@ -52,6 +63,7 @@ func main() {
 	}()
 	<-ctx.Done()
 	<-heartbeatDone
+	<-monitorDone
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = server.Shutdown(shutdownCtx)

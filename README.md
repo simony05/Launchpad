@@ -1,5 +1,8 @@
 # Launchpad
 
+Milestone 13: [application health and bounded crash recovery](docs/application-health.md)
+adds opt-in HTTP health checks, durable restart limits and runtime diagnostics.
+
 Milestone 12: [private cross-worker routing](docs/private-routing.md) adds live
 route verification and requires `LAUNCHPAD_APP_BIND_IP` on each worker.
 

@@ -43,6 +43,11 @@ func main() {
 		logger.Error("invalid registry configuration", "error", err)
 		os.Exit(1)
 	}
+	recoveryCfg, err := config.LoadRecovery()
+	if err != nil {
+		logger.Error("invalid recovery configuration", "error", err)
+		os.Exit(1)
+	}
 
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), startupTimeout)
 	defer cancelStartup()
@@ -88,7 +93,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	registryStore := workers.Postgres{Pool: pool}
-	registryServer := &http.Server{Addr: registryCfg.Address, Handler: workers.Handler(registryStore, cfg.WorkerToken), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	registryServer := &http.Server{Addr: registryCfg.Address, Handler: workers.Handler(registryStore, cfg.WorkerToken, workers.Applications{Pool: pool, MaxRestarts: recoveryCfg.MaxRestarts, Cooldown: recoveryCfg.Cooldown}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		logger.Info("worker registry listening", "address", registryCfg.Address)
 		if err := registryServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

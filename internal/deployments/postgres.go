@@ -12,7 +12,8 @@ import (
 
 const deploymentColumns = `
 	id::text, name, status::text, runtime, version, created_at, updated_at,
-	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error, worker_id::text, worker_address`
+	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error, worker_id::text, worker_address,
+	health_path, health_state, health_checked_at, restart_attempts, next_restart_at, last_exit_code, oom_killed, runtime_error, last_failure, runtime_logs`
 
 // PostgresRepository stores deployment metadata in PostgreSQL.
 type PostgresRepository struct {
@@ -25,9 +26,9 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 
 func (r *PostgresRepository) Create(ctx context.Context, input CreateInput) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
-		INSERT INTO deployments (name, status, runtime, public_identifier)
-		VALUES ($1, $2, $3, replace(gen_random_uuid()::text, '-', ''))
-		RETURNING `+deploymentColumns, input.Name, StatusPending, input.Runtime)
+		INSERT INTO deployments (name, status, runtime, public_identifier,health_path)
+		VALUES ($1, $2, $3, replace(gen_random_uuid()::text, '-', ''),$4)
+		RETURNING `+deploymentColumns, input.Name, StatusPending, input.Runtime, input.HealthPath)
 
 	deployment, err := scanDeployment(row)
 	if err != nil {
@@ -194,6 +195,8 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		&startError,
 		&deployment.WorkerID,
 		&deployment.WorkerAddress,
+		&deployment.HealthPath, &deployment.HealthState, &deployment.HealthCheckedAt, &deployment.RestartAttempts, &deployment.NextRestartAt, &deployment.LastExitCode, &deployment.OOMKilled, &deployment.RuntimeError, &deployment.LastFailure,
+		&deployment.RuntimeLogs,
 	)
 	if err != nil {
 		return Deployment{}, err

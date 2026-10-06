@@ -98,9 +98,10 @@ func (h deploymentHandler) release(id string) {
 }
 
 type createDeploymentRequest struct {
-	Name    string          `json:"name"`
-	Runtime string          `json:"runtime"`
-	Files   workspace.Files `json:"files"`
+	HealthPath string          `json:"health_path"`
+	Name       string          `json:"name"`
+	Runtime    string          `json:"runtime"`
+	Files      workspace.Files `json:"files"`
 }
 
 func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -111,8 +112,9 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deployment, err := h.repository.Create(r.Context(), deployments.CreateInput{
-		Name:    request.Name,
-		Runtime: request.Runtime,
+		HealthPath: request.HealthPath,
+		Name:       request.Name,
+		Runtime:    request.Runtime,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create deployment")
@@ -355,6 +357,9 @@ func decodeCreateDeploymentRequest(w http.ResponseWriter, r *http.Request) (crea
 		return createDeploymentRequest{}, errors.New("runtime must be python")
 	}
 	if err := workspace.ValidateFiles(request.Files); err != nil {
+		return createDeploymentRequest{}, err
+	}
+	if err := deployments.ValidateHealthPath(request.HealthPath); err != nil {
 		return createDeploymentRequest{}, err
 	}
 

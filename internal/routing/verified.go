@@ -36,6 +36,9 @@ func (v VerifiedResolver) GetByPublicIdentifier(ctx context.Context, id string) 
 	if d.Status != deployments.StatusRunning || d.ContainerID == nil {
 		return d, errors.New("deployment is not running")
 	}
+	if d.HealthState != nil && *d.HealthState != "RUNNING" {
+		return d, errors.New("application health is unavailable")
+	}
 	address := v.LegacyAddress
 	if d.WorkerID != nil {
 		w, err := v.Workers.Get(ctx, *d.WorkerID)
