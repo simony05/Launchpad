@@ -86,13 +86,13 @@ func (h deploymentHandler) clientFor(d deployments.Deployment) (worker.Client, e
 	return nil, errors.New("deployment has no worker assignment; configure legacy worker for pre-migration deployments")
 }
 
-func (h deploymentHandler) release(id string) {
+func (h deploymentHandler) release(id string, version int) {
 	if h.placement == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	if err := h.placement.Scheduler.Release(ctx, id); err != nil {
+	if err := h.placement.Scheduler.Release(ctx, id, version); err != nil {
 		slog.Error("release worker reservation", "deployment_id", id, "error", err)
 	}
 }
@@ -112,6 +112,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deployment, err := h.repository.Create(r.Context(), deployments.CreateInput{
+		Files:      request.Files,
 		HealthPath: request.HealthPath,
 		Name:       request.Name,
 		Runtime:    request.Runtime,
@@ -121,6 +122,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deploymentID := deployment.ID
+	deploymentVersion := deployment.Version
 	deployment, err = h.repository.MarkBuilding(r.Context(), deployment.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "start deployment build")
@@ -148,7 +150,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	client, err := h.clientFor(deployment)
 	if err != nil {
-		h.release(deployment.ID)
+		h.release(deployment.ID, deploymentVersion)
 		_, _ = h.failBuild(deployment.ID, "", err.Error())
 		writeError(w, 503, "worker client unavailable")
 		return
@@ -169,7 +171,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.BuildError != "" {
-		h.release(deployment.ID)
+		h.release(deployment.ID, deploymentVersion)
 		deployment, err = h.failBuild(deployment.ID, result.BuildLog, result.BuildError)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "record deployment build failure")
@@ -182,7 +184,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if result.Container != nil {
 			if stopErr := client.Stop(r.Context(), result.Container.ID); stopErr == nil {
-				h.release(deploymentID)
+				h.release(deploymentID, deploymentVersion)
 			}
 		}
 		writeError(w, http.StatusInternalServerError, "record deployment build")
@@ -192,7 +194,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if result.Container != nil {
 			if stopErr := client.Stop(r.Context(), result.Container.ID); stopErr == nil {
-				h.release(deploymentID)
+				h.release(deploymentID, deploymentVersion)
 			}
 		}
 		writeRepositoryError(w, err, "start deployment container")
@@ -216,7 +218,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 		defer cancel()
 		if err := client.Stop(cleanupCtx, result.Container.ID); err == nil {
-			h.release(deploymentID)
+			h.release(deploymentID, deploymentVersion)
 		}
 		_, _ = h.repository.FailStart(cleanupCtx, deploymentID, "container started but Launchpad could not record its startup")
 		writeRepositoryError(w, err, "record deployment startup")
@@ -274,7 +276,7 @@ func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "get deployment")
 		return
 	}
-	if deployment.Status == deployments.StatusBuilding || deployment.Status == deployments.StatusStarting || deployment.Status == deployments.StatusReadyToStart {
+	if deployment.Status == deployments.StatusBuilding || deployment.Status == deployments.StatusStarting || deployment.Status == deployments.StatusReadyToStart || deployment.Status == deployments.StatusRecovering {
 		writeError(w, http.StatusConflict, "deployment is busy")
 		return
 	}
@@ -288,10 +290,10 @@ func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "stop deployment container")
 			return
 		}
-		h.release(deployment.ID)
+		h.release(deployment.ID, deployment.Version)
 	}
 
-	deployment, err = h.repository.MarkStopped(r.Context(), deployment.ID)
+	deployment, err = h.repository.MarkStopped(r.Context(), deployment.ID, deployment.Version)
 	if err != nil {
 		writeRepositoryError(w, err, "stop deployment")
 		return

@@ -35,7 +35,7 @@ func (s *testScheduler) Reserve(_ context.Context, id string, _ containers.Limit
 	}
 	return a, nil
 }
-func (s *testScheduler) Release(context.Context, string) error { s.released = true; return nil }
+func (s *testScheduler) Release(context.Context, string, int) error { s.released = true; return nil }
 
 func TestPlacementCreatesAndStopsOnSelectedWorker(t *testing.T) {
 	repo := &memoryRepository{}

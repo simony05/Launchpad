@@ -273,7 +273,7 @@ func (r *memoryRepository) FailStart(_ context.Context, id, startError string) (
 	return deployments.Deployment{}, deployments.ErrInvalidState
 }
 
-func (r *memoryRepository) MarkStopped(_ context.Context, id string) (deployments.Deployment, error) {
+func (r *memoryRepository) MarkStopped(_ context.Context, id string, version int) (deployments.Deployment, error) {
 	for index, deployment := range r.items {
 		if deployment.ID == id && deployment.Status != deployments.StatusBuilding && deployment.Status != deployments.StatusStarting {
 			deployment.Status = deployments.StatusStopped

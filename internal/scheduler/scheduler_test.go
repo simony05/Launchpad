@@ -100,7 +100,7 @@ func TestPostgresPlacement(t *testing.T) {
 	if _, err := s.Reserve(ctx, id, limits); err == nil {
 		t.Fatal("duplicate reservation accepted")
 	}
-	if err := s.Release(ctx, id); err != nil {
+	if err := s.Release(ctx, id, 1); err != nil {
 		t.Fatal(err)
 	}
 	// A fresh heartbeat cannot erase existing reservations.
@@ -141,10 +141,10 @@ func TestPostgresPlacement(t *testing.T) {
 	if _, err := s.Reserve(ctx, create(), limits); !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("heartbeat erased reservation: %v", err)
 	}
-	if err := s.Release(ctx, first); err != nil {
+	if err := s.Release(ctx, first, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Release(ctx, second); err != nil {
+	if err := s.Release(ctx, second, 1); err != nil {
 		t.Fatal(err)
 	}
 	// Stale HEALTHY workers are rejected before the periodic monitor runs.

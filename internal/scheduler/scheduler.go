@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/simon/launchpad/internal/containers"
 )
@@ -22,7 +21,7 @@ type Assignment struct {
 }
 type Scheduler interface {
 	Reserve(context.Context, string, containers.Limits) (Assignment, error)
-	Release(context.Context, string) error
+	Release(context.Context, string, int) error
 }
 
 type Postgres struct {
@@ -77,21 +76,7 @@ func (p Postgres) Reserve(ctx context.Context, id string, limits containers.Limi
 	if status != "BUILDING" || assigned != nil {
 		return Assignment{}, errors.New("deployment is not awaiting placement")
 	}
-	var a Assignment
-	// Subtract all outstanding reservations from reported free capacity. This is
-	// conservative for already-running containers but safe with stale snapshots.
-	err = tx.QueryRow(ctx, `SELECT w.id::text,w.address FROM workers w
- LEFT JOIN LATERAL (
-   SELECT COALESCE(SUM(reserved_cpu),0) AS cpu,COALESCE(SUM(reserved_memory),0) AS memory
-   FROM deployments WHERE worker_id=w.id AND capacity_reserved
- ) r ON true
- WHERE w.status='HEALTHY'
- AND w.last_heartbeat >= clock_timestamp()-($1 * interval '1 second')
- AND w.available_cpu-r.cpu >= $2 AND w.available_memory-r.memory >= $3
- ORDER BY w.available_memory-r.memory DESC,w.id ASC LIMIT 1`, p.HeartbeatTimeout.Seconds(), cpu, memory).Scan(&a.WorkerID, &a.Address)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Assignment{}, ErrNoCapacity
-	}
+	a, err := Choose(ctx, tx, p.HeartbeatTimeout, cpu, memory, "")
 	if err != nil {
 		return Assignment{}, err
 	}
@@ -105,7 +90,7 @@ func (p Postgres) Reserve(ctx context.Context, id string, limits containers.Limi
 	return a, nil
 }
 
-func (p Postgres) Release(ctx context.Context, id string) error {
-	_, err := p.Pool.Exec(ctx, `UPDATE deployments SET capacity_reserved=FALSE WHERE id=$1`, id)
+func (p Postgres) Release(ctx context.Context, id string, version int) error {
+	_, err := p.Pool.Exec(ctx, `UPDATE deployments SET capacity_reserved=FALSE WHERE id=$1 AND version=$2`, id, version)
 	return err
 }

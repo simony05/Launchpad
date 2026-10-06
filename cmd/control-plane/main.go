@@ -10,10 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+
 	"github.com/simon/launchpad/internal/config"
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/database"
 	"github.com/simon/launchpad/internal/deployments"
+	"github.com/simon/launchpad/internal/failover"
 	"github.com/simon/launchpad/internal/httpserver"
 	"github.com/simon/launchpad/internal/routing"
 	"github.com/simon/launchpad/internal/scheduler"
@@ -63,6 +67,11 @@ func main() {
 	}
 
 	deploymentRepository := deployments.NewPostgresRepository(pool)
+	failoverCfg, err := config.LoadFailover(registryCfg.Timeout)
+	if err != nil {
+		logger.Error("invalid failover configuration", "error", err)
+		os.Exit(1)
+	}
 	buildTimeout := time.Duration(cfg.BuildTimeoutSeconds) * time.Second
 	startTimeout := time.Duration(cfg.StartTimeoutSeconds) * time.Second
 	var workerClient worker.Client
@@ -92,6 +101,18 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	failoverDone := make(chan struct{})
+	if failoverCfg.Enabled {
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(failoverCfg.Region))
+		if err != nil {
+			logger.Error("configure EC2 fencing", "error", err)
+			os.Exit(1)
+		}
+		engine := failover.Engine{Pool: pool, Fencer: failover.EC2Fencer{Client: ec2.NewFromConfig(awsCfg)}, Client: placement.Client, Grace: failoverCfg.Grace, HeartbeatTimeout: registryCfg.Timeout, OperationTimeout: buildTimeout + startTimeout, MaxAttempts: failoverCfg.MaxAttempts, Logger: logger, Invalidate: applicationRouter.Invalidate}
+		go func() { defer close(failoverDone); engine.Run(ctx, failoverCfg.Interval) }()
+	} else {
+		close(failoverDone)
+	}
 	registryStore := workers.Postgres{Pool: pool}
 	registryServer := &http.Server{Addr: registryCfg.Address, Handler: workers.Handler(registryStore, cfg.WorkerToken, workers.Applications{Pool: pool, MaxRestarts: recoveryCfg.MaxRestarts, Cooldown: recoveryCfg.Cooldown}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
@@ -108,6 +129,7 @@ func main() {
 	}()
 	<-ctx.Done()
 	<-monitorDone
+	<-failoverDone
 
 	logger.Info("control plane shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)

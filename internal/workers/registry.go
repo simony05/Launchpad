@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ import (
 )
 
 type Report struct {
+	InstanceID        string  `json:"instance_id,omitempty"`
 	ID                string  `json:"id"`
 	Hostname          string  `json:"hostname"`
 	Address           string  `json:"address"`
@@ -29,12 +31,17 @@ type Report struct {
 }
 
 type Worker struct {
+	RecoveryState string  `json:"recovery_state"`
+	FencingError  *string `json:"fencing_error"`
 	Report
 	Status        string    `json:"status"`
 	LastHeartbeat time.Time `json:"last_heartbeat"`
 }
 
 func (r Report) Validate() error {
+	if r.InstanceID != "" && !regexp.MustCompile(`^i-([0-9a-f]{8}|[0-9a-f]{17})$`).MatchString(r.InstanceID) {
+		return errors.New("invalid EC2 instance ID")
+	}
 	id, err := uuid.Parse(r.ID)
 	u, urlErr := url.Parse(r.Address)
 	if err != nil || id == uuid.Nil || r.Hostname == "" || len(r.Hostname) > 255 || urlErr != nil || u.Scheme != "http" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
@@ -55,7 +62,7 @@ type Postgres struct{ Pool *pgxpool.Pool }
 
 func (p Postgres) Get(ctx context.Context, id string) (Worker, error) {
 	var w Worker
-	err := p.Pool.QueryRow(ctx, `SELECT id::text,hostname,address,status,last_heartbeat FROM workers WHERE id=$1`, id).Scan(&w.ID, &w.Hostname, &w.Address, &w.Status, &w.LastHeartbeat)
+	err := p.Pool.QueryRow(ctx, `SELECT id::text,hostname,address,status,last_heartbeat,recovery_state FROM workers WHERE id=$1`, id).Scan(&w.ID, &w.Hostname, &w.Address, &w.Status, &w.LastHeartbeat, &w.RecoveryState)
 	w.Healthy = w.Status == "HEALTHY"
 	return w, err
 }
@@ -66,9 +73,13 @@ func (p Postgres) Record(ctx context.Context, r Report) error {
 	if r.Healthy {
 		status = "HEALTHY"
 	}
-	_, err := p.Pool.Exec(ctx, `INSERT INTO workers (id,hostname,address,status,total_cpu,available_cpu,total_memory,available_memory,running_containers,last_heartbeat)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp())
- ON CONFLICT (id) DO UPDATE SET hostname=EXCLUDED.hostname,address=EXCLUDED.address,status=EXCLUDED.status,total_cpu=EXCLUDED.total_cpu,available_cpu=EXCLUDED.available_cpu,total_memory=EXCLUDED.total_memory,available_memory=EXCLUDED.available_memory,running_containers=EXCLUDED.running_containers,last_heartbeat=clock_timestamp()`, r.ID, r.Hostname, r.Address, status, r.TotalCPU, r.AvailableCPU, r.TotalMemory, r.AvailableMemory, r.RunningContainers)
+	result, err := p.Pool.Exec(ctx, `INSERT INTO workers (id,hostname,address,status,total_cpu,available_cpu,total_memory,available_memory,running_containers,last_heartbeat,instance_id)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp(),$10)
+ ON CONFLICT (id) DO UPDATE SET hostname=EXCLUDED.hostname,address=EXCLUDED.address,status=EXCLUDED.status,total_cpu=EXCLUDED.total_cpu,available_cpu=EXCLUDED.available_cpu,total_memory=EXCLUDED.total_memory,available_memory=EXCLUDED.available_memory,running_containers=EXCLUDED.running_containers,last_heartbeat=clock_timestamp(),instance_id=EXCLUDED.instance_id
+ WHERE workers.recovery_state='ACTIVE' AND (workers.instance_id='' OR workers.instance_id=EXCLUDED.instance_id)`, r.ID, r.Hostname, r.Address, status, r.TotalCPU, r.AvailableCPU, r.TotalMemory, r.AvailableMemory, r.RunningContainers, r.InstanceID)
+	if err == nil && result.RowsAffected() == 0 {
+		return errors.New("worker quarantined or instance identity changed")
+	}
 	return err
 }
 func (p Postgres) Expire(ctx context.Context, timeout time.Duration) error {
@@ -76,7 +87,7 @@ func (p Postgres) Expire(ctx context.Context, timeout time.Duration) error {
 	return err
 }
 func (p Postgres) List(ctx context.Context) ([]Worker, error) {
-	rows, err := p.Pool.Query(ctx, `SELECT id::text,hostname,address,status,total_cpu,available_cpu,total_memory,available_memory,running_containers,last_heartbeat FROM workers ORDER BY id`)
+	rows, err := p.Pool.Query(ctx, `SELECT id::text,hostname,address,status,total_cpu,available_cpu,total_memory,available_memory,running_containers,last_heartbeat,instance_id,recovery_state,fencing_error FROM workers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +95,7 @@ func (p Postgres) List(ctx context.Context) ([]Worker, error) {
 	result := []Worker{}
 	for rows.Next() {
 		var w Worker
-		if err := rows.Scan(&w.ID, &w.Hostname, &w.Address, &w.Status, &w.TotalCPU, &w.AvailableCPU, &w.TotalMemory, &w.AvailableMemory, &w.RunningContainers, &w.LastHeartbeat); err != nil {
+		if err := rows.Scan(&w.ID, &w.Hostname, &w.Address, &w.Status, &w.TotalCPU, &w.AvailableCPU, &w.TotalMemory, &w.AvailableMemory, &w.RunningContainers, &w.LastHeartbeat, &w.InstanceID, &w.RecoveryState, &w.FencingError); err != nil {
 			return nil, err
 		}
 		w.Healthy = w.Status == "HEALTHY"

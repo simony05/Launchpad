@@ -91,8 +91,25 @@ func (s *LocalStore) Store(ctx context.Context, deploymentID string, files Files
 	}
 
 	finalPath, _ := Path(s.root, deploymentID)
-	if _, err := os.Lstat(finalPath); err == nil {
-		return errors.New("deployment workspace already exists")
+	if info, err := os.Lstat(finalPath); err == nil {
+		if !info.IsDir() {
+			return errors.New("deployment workspace is not a directory")
+		}
+		for name, contents := range files {
+			path := filepath.Join(finalPath, name)
+			info, err := os.Lstat(path)
+			if err != nil || !info.Mode().IsRegular() {
+				return errors.New("existing source is not a regular file")
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if string(data) != contents {
+				return errors.New("deployment source is immutable")
+			}
+		}
+		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect deployment workspace: %w", err)
 	}

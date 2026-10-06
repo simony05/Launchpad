@@ -15,6 +15,7 @@ type RegistryConfig struct {
 	Timeout, CheckInterval time.Duration
 }
 type HeartbeatConfig struct {
+	InstanceID                             string
 	ControlPlaneURL, ID, Hostname, Address string
 	Interval                               time.Duration
 }
@@ -52,6 +53,7 @@ func LoadHeartbeat() (HeartbeatConfig, error) {
 		return HeartbeatConfig{}, err
 	}
 	cfg := HeartbeatConfig{ControlPlaneURL: os.Getenv("LAUNCHPAD_CONTROL_PLANE_URL"), ID: os.Getenv("LAUNCHPAD_WORKER_ID"), Hostname: envOrDefault("LAUNCHPAD_WORKER_HOSTNAME", hostname), Address: os.Getenv("LAUNCHPAD_WORKER_ADVERTISE_URL")}
+	cfg.InstanceID = os.Getenv("LAUNCHPAD_WORKER_INSTANCE_ID")
 	id, err := uuid.Parse(cfg.ID)
 	if err != nil || id == uuid.Nil {
 		return cfg, fmt.Errorf("LAUNCHPAD_WORKER_ID must be a nonzero UUID")

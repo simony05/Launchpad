@@ -47,7 +47,8 @@ func (a Applications) Observe(ctx context.Context, workerID string, o Observatio
 	var attempts int
 	var eligible bool
 	err = tx.QueryRow(ctx, `SELECT restart_attempts,(next_restart_at IS NULL OR next_restart_at <= clock_timestamp()) FROM deployments
- WHERE id=$1 AND worker_id=$2 AND container_id=$3 AND version=$4 AND status='RUNNING' FOR UPDATE`, o.DeploymentID, workerID, o.ContainerID, o.Version).Scan(&attempts, &eligible)
+ WHERE id=$1 AND worker_id=$2 AND container_id=$3 AND version=$4 AND status='RUNNING'
+ AND EXISTS(SELECT 1 FROM workers WHERE id=$2 AND recovery_state='ACTIVE') FOR UPDATE`, o.DeploymentID, workerID, o.ContainerID, o.Version).Scan(&attempts, &eligible)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RecoveryDecision{}, nil
 	}
@@ -82,6 +83,29 @@ func (a Applications) Observe(ctx context.Context, workerID string, o Observatio
 }
 
 func (a Applications) routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /internal/workers/{id}/assignments/{deployment}", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := uuid.Parse(r.PathValue("deployment")); err != nil {
+			http.Error(w, "invalid deployment id", 400)
+			return
+		}
+		if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+			http.Error(w, "invalid worker id", 400)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		var allowed bool
+		err := a.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deployments d JOIN workers w ON w.id=d.worker_id WHERE d.id=$1 AND w.id=$2 AND d.version::text=$3 AND d.status IN ('BUILDING','READY_TO_START','STARTING','RECOVERING','RUNNING') AND w.recovery_state='ACTIVE')`, r.PathValue("deployment"), r.PathValue("id"), r.URL.Query().Get("version")).Scan(&allowed)
+		if err != nil {
+			http.Error(w, "assignment lookup failed", 503)
+			return
+		}
+		if !allowed {
+			http.Error(w, "assignment revoked", 409)
+			return
+		}
+		w.WriteHeader(204)
+	})
 	mux.HandleFunc("GET /internal/workers/{id}/applications", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := uuid.Parse(r.PathValue("id")); err != nil {
 			http.Error(w, "invalid worker id", 400)

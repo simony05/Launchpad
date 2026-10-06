@@ -21,5 +21,5 @@ type Repository interface {
 	MarkStarting(context.Context, string) (Deployment, error)
 	CompleteStart(context.Context, string, string, int, int) (Deployment, error)
 	FailStart(context.Context, string, string) (Deployment, error)
-	MarkStopped(context.Context, string) (Deployment, error)
+	MarkStopped(context.Context, string, int) (Deployment, error)
 }

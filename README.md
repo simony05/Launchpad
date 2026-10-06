@@ -1,5 +1,9 @@
 # Launchpad
 
+Milestone 14: [worker failure recovery](docs/worker-failover.md) adds durable source,
+grace periods, confirmed EC2 fencing, and versioned rescheduling. Automatic worker
+recovery is opt-in and requires worker identities/tags and scoped EC2 permissions.
+
 Milestone 13: [application health and bounded crash recovery](docs/application-health.md)
 adds opt-in HTTP health checks, durable restart limits and runtime diagnostics.
 

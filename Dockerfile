@@ -13,7 +13,8 @@ FROM docker:27-cli AS docker-cli
 
 FROM alpine:3.21 AS runtime
 
-RUN addgroup -S launchpad && \
+RUN apk add --no-cache ca-certificates && \
+    addgroup -S launchpad && \
     adduser -S -G launchpad launchpad && \
     mkdir -p /workspaces /usr/local/libexec/docker/cli-plugins && \
     chown launchpad:launchpad /workspaces

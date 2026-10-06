@@ -77,7 +77,7 @@ func TestPersistentRecoveryBudget(t *testing.T) {
 	if saved.Status != deployments.StatusFailed || saved.RestartAttempts != 3 || saved.RuntimeError == nil || saved.LastExitCode == nil || *saved.LastExitCode != 137 || !saved.OOMKilled || saved.RuntimeLogs != "Traceback: crash" {
 		t.Fatalf("failure not persisted: %+v", saved)
 	}
-	if _, err := repo.MarkStopped(ctx, d.ID); err != nil {
+	if _, err := repo.MarkStopped(ctx, d.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	o.State = "RUNNING"

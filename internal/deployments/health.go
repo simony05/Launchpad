@@ -19,7 +19,7 @@ func ValidateHealthPath(path string) error {
 }
 
 func (r *PostgresRepository) ListRunningOnWorker(ctx context.Context, id string) ([]Deployment, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id::text,version,container_id,health_path,restart_attempts FROM deployments WHERE worker_id=$1 AND status='RUNNING' ORDER BY id`, id)
+	rows, err := r.pool.Query(ctx, `SELECT id::text,version,container_id,health_path,restart_attempts FROM deployments WHERE worker_id=$1 AND status='RUNNING' AND EXISTS(SELECT 1 FROM workers WHERE id=$1 AND recovery_state='ACTIVE') ORDER BY id`, id)
 	if err != nil {
 		return nil, err
 	}

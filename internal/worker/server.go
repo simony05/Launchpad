@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -9,7 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,8 +20,11 @@ import (
 const maxRequestBodySize = 2 << 20
 
 // NewServer exposes the worker's authenticated, private API.
-func NewServer(address, token string, logger *slog.Logger, sourceStore workspace.Store, builder build.Builder, manager containers.Manager) *http.Server {
+func NewServer(address, token string, logger *slog.Logger, sourceStore workspace.Store, builder build.Builder, manager containers.Manager, guards ...StartGuard) *http.Server {
 	handler := handler{sourceStore: sourceStore, builder: builder, manager: manager}
+	if len(guards) > 0 {
+		handler.guard = guards[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.health)
 	mux.HandleFunc("POST /internal/deployments/start", handler.start)
@@ -40,16 +42,18 @@ func NewServer(address, token string, logger *slog.Logger, sourceStore workspace
 }
 
 type handler struct {
+	locks       [64]sync.Mutex
+	guard       StartGuard
 	sourceStore workspace.Store
 	builder     build.Builder
 	manager     containers.Manager
 }
 
-func (h handler) health(w http.ResponseWriter, _ *http.Request) {
+func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h handler) start(w http.ResponseWriter, request *http.Request) {
+func (h *handler) start(w http.ResponseWriter, request *http.Request) {
 	var input StartRequest
 	if err := decodeJSON(w, request, &input); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -63,6 +67,40 @@ func (h handler) start(w http.ResponseWriter, request *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Bounded lock striping serializes retries without retaining a lock per app.
+	var stripe uint32
+	for _, b := range []byte(input.DeploymentID) {
+		stripe = stripe*31 + uint32(b)
+	}
+	h.locks[stripe%64].Lock()
+	defer h.locks[stripe%64].Unlock()
+	allowed := func() bool {
+		if h.guard != nil {
+			if err := h.guard(request.Context(), input.DeploymentID, input.Version); err != nil {
+				writeError(w, http.StatusConflict, "deployment assignment is unavailable or superseded")
+				return false
+			}
+		}
+		return true
+	}
+	if !allowed() {
+		return
+	}
+	if h.guard != nil {
+		status, err := h.manager.Status(request.Context(), input.DeploymentID, input.Version)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "inspect existing deployment before start")
+			return
+		}
+		if status.ContainerID != "" {
+			if !status.Running {
+				writeJSON(w, http.StatusOK, StartResult{StartError: "existing container is stopped; start was not repeated"})
+				return
+			}
+			writeJSON(w, http.StatusOK, StartResult{ImageName: build.ImageName(input.DeploymentID, input.Version), Container: &containers.Container{ID: status.ContainerID, InternalPort: 8000, HostPort: status.HostPort}})
+			return
+		}
+	}
 	if err := h.sourceStore.Store(request.Context(), input.DeploymentID, input.Files); err != nil {
 		writeError(w, http.StatusInternalServerError, "store deployment source")
 		return
@@ -72,6 +110,9 @@ func (h handler) start(w http.ResponseWriter, request *http.Request) {
 	if buildErr != nil {
 		result.BuildError = buildErr.Error()
 		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if !allowed() {
 		return
 	}
 	container, startErr := h.manager.Start(request.Context(), input.DeploymentID, buildResult.ImageName, input.Version, input.Limits)
@@ -84,7 +125,7 @@ func (h handler) start(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h handler) stop(w http.ResponseWriter, request *http.Request) {
+func (h *handler) stop(w http.ResponseWriter, request *http.Request) {
 	var input struct {
 		ContainerID string `json:"container_id"`
 	}
@@ -99,7 +140,7 @@ func (h handler) stop(w http.ResponseWriter, request *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h handler) status(w http.ResponseWriter, request *http.Request) {
+func (h *handler) status(w http.ResponseWriter, request *http.Request) {
 	deploymentID := request.PathValue("id")
 	version, err := strconv.Atoi(request.URL.Query().Get("version"))
 	if _, parseErr := uuid.Parse(deploymentID); parseErr != nil || err != nil || version < 1 {
@@ -114,7 +155,7 @@ func (h handler) status(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, Status{DeploymentID: deploymentID, Version: version, Running: status.Running, ContainerID: status.ContainerID, HostPort: status.HostPort})
 }
 
-func (h handler) resources(w http.ResponseWriter, request *http.Request) {
+func (h *handler) resources(w http.ResponseWriter, request *http.Request) {
 	resources, err := h.manager.Resources(request.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get worker resources")
@@ -168,6 +209,3 @@ func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 		logger.Info("worker request", "method", request.Method, "path", request.URL.Path, "duration", time.Since(started))
 	})
 }
-
-var _ context.Context
-var _ = strings.TrimSpace

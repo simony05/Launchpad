@@ -1,6 +1,10 @@
 package deployments
 
-import "time"
+import (
+	"time"
+
+	"github.com/simon/launchpad/internal/workspace"
+)
 
 // Status describes a deployment's lifecycle state.
 type Status string
@@ -13,10 +17,13 @@ const (
 	StatusFailed       Status = "FAILED"
 	StatusStopped      Status = "STOPPED"
 	StatusReadyToStart Status = "READY_TO_START"
+	StatusRecovering   Status = "RECOVERING"
 )
 
 // Deployment is Launchpad's metadata record for an application deployment.
 type Deployment struct {
+	FailoverAttempts int        `json:"failover_attempts"`
+	RecoveryError    *string    `json:"recovery_error"`
 	RuntimeLogs      string     `json:"runtime_logs"`
 	HealthPath       string     `json:"health_path"`
 	HealthState      *string    `json:"health_state"`
@@ -49,6 +56,7 @@ type Deployment struct {
 
 // CreateInput contains metadata accepted when creating a deployment.
 type CreateInput struct {
+	Files      workspace.Files
 	HealthPath string
 	Name       string
 	Runtime    string

@@ -41,7 +41,7 @@ func main() {
 		logger.Error("LAUNCHPAD_APP_BIND_IP must match the private IP in LAUNCHPAD_WORKER_ADVERTISE_URL")
 		os.Exit(1)
 	}
-	server := worker.NewServer(cfg.Address(), cfg.WorkerToken, logger, workspace.NewLocalStore(cfg.WorkspaceRoot), build.NewDockerBuilder(cfg.WorkspaceRoot, time.Duration(cfg.BuildTimeoutSeconds)*time.Second), containers.NewDockerManager(time.Duration(cfg.StartTimeoutSeconds)*time.Second, cfg.AppBindIP))
+	server := worker.NewServer(cfg.Address(), cfg.WorkerToken, logger, workspace.NewLocalStore(cfg.WorkspaceRoot), build.NewDockerBuilder(cfg.WorkspaceRoot, time.Duration(cfg.BuildTimeoutSeconds)*time.Second), containers.NewDockerManager(time.Duration(cfg.StartTimeoutSeconds)*time.Second, cfg.AppBindIP), worker.AssignmentGuard(heartbeatCfg.ControlPlaneURL, heartbeatCfg.ID, cfg.WorkerToken))
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("worker stopped unexpectedly", "error", err)
@@ -59,7 +59,7 @@ func main() {
 	heartbeatDone := make(chan struct{})
 	go func() {
 		defer close(heartbeatDone)
-		worker.ReportHeartbeats(ctx, heartbeatCfg.ControlPlaneURL, cfg.WorkerToken, workers.Report{ID: heartbeatCfg.ID, Hostname: heartbeatCfg.Hostname, Address: heartbeatCfg.Address}, containers.NewDockerManager(5*time.Second), heartbeatCfg.Interval, logger)
+		worker.ReportHeartbeats(ctx, heartbeatCfg.ControlPlaneURL, cfg.WorkerToken, workers.Report{ID: heartbeatCfg.ID, Hostname: heartbeatCfg.Hostname, Address: heartbeatCfg.Address, InstanceID: heartbeatCfg.InstanceID}, containers.NewDockerManager(5*time.Second), heartbeatCfg.Interval, logger)
 	}()
 	<-ctx.Done()
 	<-heartbeatDone

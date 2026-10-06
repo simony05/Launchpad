@@ -41,3 +41,28 @@ func TestValidateFilesRejectsUnexpectedFilename(t *testing.T) {
 		t.Fatal("ValidateFiles() error = nil, want error")
 	}
 }
+
+func TestStoreRetryIsImmutable(t *testing.T) {
+	root := t.TempDir()
+	store := NewLocalStore(root)
+	files := Files{AppFilename: "app = 1", RequirementsFilename: ""}
+	for i := 0; i < 2; i++ {
+		if err := store.Store(context.Background(), deploymentID, files); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files[AppFilename] = "app = 2"
+	if err := store.Store(context.Background(), deploymentID, files); err == nil {
+		t.Fatal("source overwrite accepted")
+	}
+	path := filepath.Join(root, deploymentID, AppFilename)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, deploymentID, RequirementsFilename), path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Store(context.Background(), deploymentID, files); err == nil {
+		t.Fatal("source symlink accepted")
+	}
+}
