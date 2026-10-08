@@ -15,7 +15,7 @@ import (
 const deploymentColumns = `
 	id::text, name, status::text, runtime, version, created_at, updated_at,
 	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error, worker_id::text, worker_address,
-	health_path, health_state, health_checked_at, restart_attempts, next_restart_at, last_exit_code, oom_killed, runtime_error, last_failure, runtime_logs,failover_attempts,recovery_error,last_request_at,idle_epoch,idle_error,cold_start_ms,ttl_seconds,expires_at,expiration_attempts,expiration_error`
+	health_path, health_state, health_checked_at, restart_attempts, next_restart_at, last_exit_code, oom_killed, runtime_error, last_failure, runtime_logs,failover_attempts,recovery_error,last_request_at,idle_epoch,idle_error,cold_start_ms,ttl_seconds,expires_at,expiration_attempts,expiration_error,build_completed_at,startup_failed_at`
 
 // PostgresRepository stores deployment metadata in PostgreSQL.
 type PostgresRepository struct {
@@ -107,7 +107,7 @@ func (r *PostgresRepository) Delete(ctx context.Context, id string) error {
 func (r *PostgresRepository) MarkBuilding(ctx context.Context, id string) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
-		SET status = $2, image_name = NULL, build_log = NULL, build_error = NULL
+		SET status = $2, image_name = NULL, build_log = NULL, build_error = NULL, build_completed_at=NULL
 		WHERE id = $1 AND status = $3
 		RETURNING `+deploymentColumns, id, StatusBuilding, StatusPending)
 	return r.scanUpdatedDeployment(row, "mark deployment building")
@@ -116,7 +116,7 @@ func (r *PostgresRepository) MarkBuilding(ctx context.Context, id string) (Deplo
 func (r *PostgresRepository) CompleteBuild(ctx context.Context, id, imageName, buildLog string) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
-		SET status = $2, image_name = $3, build_log = $4, build_error = NULL
+		SET status = $2, image_name = $3, build_log = $4, build_error = NULL, build_completed_at=clock_timestamp()
 		WHERE id = $1 AND status = $5
 		RETURNING `+deploymentColumns, id, StatusReadyToStart, imageName, buildLog, StatusBuilding)
 	return r.scanUpdatedDeployment(row, "complete deployment build")
@@ -125,7 +125,7 @@ func (r *PostgresRepository) CompleteBuild(ctx context.Context, id, imageName, b
 func (r *PostgresRepository) FailBuild(ctx context.Context, id, buildLog, buildError string) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
-		SET status = $2, build_log = $3, build_error = $4
+		SET status = $2, build_log = $3, build_error = $4, build_completed_at=clock_timestamp()
 		WHERE id = $1 AND status = $5
 		RETURNING `+deploymentColumns, id, StatusFailed, buildLog, buildError, StatusBuilding)
 	return r.scanUpdatedDeployment(row, "fail deployment build")
@@ -134,7 +134,7 @@ func (r *PostgresRepository) FailBuild(ctx context.Context, id, buildLog, buildE
 func (r *PostgresRepository) MarkStarting(ctx context.Context, id string) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
-		SET status = $2, container_id = NULL, internal_port = NULL, host_port = NULL, start_error = NULL
+		SET status = $2, container_id = NULL, internal_port = NULL, host_port = NULL, start_error = NULL, startup_failed_at=NULL
 		WHERE id = $1 AND status = $3
 		RETURNING `+deploymentColumns, id, StatusStarting, StatusReadyToStart)
 	return r.scanUpdatedDeployment(row, "mark deployment starting")
@@ -152,7 +152,7 @@ func (r *PostgresRepository) CompleteStart(ctx context.Context, id, containerID 
 func (r *PostgresRepository) FailStart(ctx context.Context, id, startError string) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
-		SET status = $2, start_error = $3
+		SET status = $2, start_error = $3, startup_failed_at=clock_timestamp()
 		WHERE id = $1 AND status = $4
 		RETURNING `+deploymentColumns, id, StatusFailed, startError, StatusStarting)
 	return r.scanUpdatedDeployment(row, "fail deployment start")
@@ -266,6 +266,7 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		&deployment.FailoverAttempts, &deployment.RecoveryError,
 		&deployment.LastRequestAt, &deployment.IdleEpoch, &deployment.IdleError, &deployment.ColdStartMS,
 		&deployment.TTLSeconds, &deployment.ExpiresAt, &deployment.ExpirationAttempts, &deployment.ExpirationError,
+		&deployment.BuildCompletedAt, &deployment.StartupFailedAt,
 	)
 	if err != nil {
 		return Deployment{}, err

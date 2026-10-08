@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,8 @@ func New(address string, logger *slog.Logger, deploymentRepository deployments.R
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
 	mux.HandleFunc("GET /deployments/{id}", deploymentHandler.get)
+	mux.HandleFunc("GET /deployments/{id}/logs", deploymentHandler.logs)
+	mux.HandleFunc("GET /deployments/{id}/errors", deploymentHandler.errors)
 	mux.HandleFunc("DELETE /deployments/{id}", deploymentHandler.delete)
 	mux.HandleFunc("GET /internal/tls/allow", deploymentHandler.allowTLS)
 	mux.Handle("/apps/{publicIdentifier}", applicationRouter)
@@ -273,6 +276,228 @@ func (h deploymentHandler) get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeDeployment(w, http.StatusOK, deployment)
+}
+
+const (
+	defaultLogTail = 100
+	maxLogTail     = 500
+	maxLogBytes    = 64 << 10
+	maxLogLineSize = 2048
+)
+
+type logEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Stage     string    `json:"stage"`
+	Stream    string    `json:"stream"`
+	Message   string    `json:"message"`
+}
+
+type deploymentError struct {
+	Timestamp time.Time `json:"timestamp"`
+	Type      string    `json:"type"`
+	Stage     string    `json:"stage"`
+	Message   string    `json:"message"`
+}
+
+func (h deploymentHandler) logs(w http.ResponseWriter, r *http.Request) {
+	deployment, ok := h.getForDetail(w, r)
+	if !ok {
+		return
+	}
+	limit, err := parseTailLimit(r.URL.Query().Get("tail"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	entries := make([]logEntry, 0)
+	buildTimestamp := deployment.CreatedAt
+	if deployment.BuildCompletedAt != nil {
+		buildTimestamp = *deployment.BuildCompletedAt
+	}
+	if deployment.BuildLog != nil {
+		entries = appendLogLines(entries, "BUILD", "stdout", *deployment.BuildLog, buildTimestamp)
+	}
+	if deployment.BuildError != nil {
+		entries = appendLogLines(entries, "BUILD", "stderr", *deployment.BuildError, buildTimestamp)
+	}
+	if deployment.StartError != nil {
+		startupTimestamp := deployment.UpdatedAt
+		if deployment.StartupFailedAt != nil {
+			startupTimestamp = *deployment.StartupFailedAt
+		}
+		entries = appendLogLines(entries, "STARTUP", "stderr", *deployment.StartError, startupTimestamp)
+	}
+	if deployment.RuntimeLogs != "" {
+		entries = appendLogLines(entries, "RUNTIME", "stdout", deployment.RuntimeLogs, runtimeTimestamp(deployment))
+	}
+	if deployment.RuntimeError != nil && *deployment.RuntimeError != "" {
+		entries = appendLogLines(entries, runtimeStage(deployment), "stderr", *deployment.RuntimeError, runtimeTimestamp(deployment))
+	}
+	if len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	entries = capLogBytes(entries, maxLogBytes)
+	writeJSON(w, http.StatusOK, map[string]any{"deployment_id": deployment.ID, "tail": limit, "logs": entries})
+}
+
+func (h deploymentHandler) errors(w http.ResponseWriter, r *http.Request) {
+	deployment, ok := h.getForDetail(w, r)
+	if !ok {
+		return
+	}
+	items := make([]deploymentError, 0, 4)
+	if deployment.BuildError != nil && *deployment.BuildError != "" {
+		typ := "BUILD_FAILURE"
+		message := *deployment.BuildError
+		if looksLikeDependencyFailure(message, value(deployment.BuildLog)) {
+			typ = "DEPENDENCY_INSTALLATION_FAILURE"
+		}
+		timestamp := deployment.UpdatedAt
+		if deployment.BuildCompletedAt != nil {
+			timestamp = *deployment.BuildCompletedAt
+		}
+		items = append(items, deploymentError{Timestamp: timestamp, Type: typ, Stage: "BUILD", Message: boundedMessage(message)})
+	}
+	if deployment.StartError != nil && *deployment.StartError != "" {
+		timestamp := deployment.UpdatedAt
+		if deployment.StartupFailedAt != nil {
+			timestamp = *deployment.StartupFailedAt
+		}
+		items = append(items, deploymentError{Timestamp: timestamp, Type: "CONTAINER_STARTUP_FAILURE", Stage: "STARTUP", Message: boundedMessage(*deployment.StartError)})
+	}
+	if deployment.HealthState != nil && *deployment.HealthState == "EXITED" {
+		message := "application container exited"
+		if deployment.LastExitCode != nil {
+			message = "application container exited with code " + strconv.Itoa(*deployment.LastExitCode)
+		}
+		if deployment.OOMKilled {
+			message += " (out of memory)"
+		}
+		if deployment.LastFailure != nil && *deployment.LastFailure != "" {
+			message = *deployment.LastFailure
+		}
+		items = append(items, deploymentError{Timestamp: runtimeTimestamp(deployment), Type: "APPLICATION_CRASH", Stage: "RUNTIME", Message: boundedMessage(message)})
+	} else if deployment.HealthState != nil && *deployment.HealthState == "UNHEALTHY" {
+		message := "application health check failed"
+		if deployment.RuntimeError != nil && *deployment.RuntimeError != "" {
+			message = *deployment.RuntimeError
+		}
+		items = append(items, deploymentError{Timestamp: runtimeTimestamp(deployment), Type: "HEALTH_CHECK_FAILURE", Stage: "HEALTH_CHECK", Message: boundedMessage(message)})
+	}
+	if deployment.RecoveryError != nil && *deployment.RecoveryError != "" {
+		items = append(items, deploymentError{Timestamp: deployment.UpdatedAt, Type: "WORKER_RECOVERY_FAILURE", Stage: "RECOVERY", Message: boundedMessage(*deployment.RecoveryError)})
+	}
+	if deployment.ExpirationError != nil && *deployment.ExpirationError != "" {
+		items = append(items, deploymentError{Timestamp: deployment.UpdatedAt, Type: "CLEANUP_FAILURE", Stage: "CLEANUP", Message: boundedMessage(*deployment.ExpirationError)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deployment_id": deployment.ID, "status": deployment.Status, "errors": items})
+}
+
+func (h deploymentHandler) getForDetail(w http.ResponseWriter, r *http.Request) (deployments.Deployment, bool) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, http.StatusBadRequest, "deployment id must be a UUID")
+		return deployments.Deployment{}, false
+	}
+	d, err := h.repository.Get(r.Context(), id)
+	if errors.Is(err, deployments.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "deployment not found")
+		return deployments.Deployment{}, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get deployment")
+		return deployments.Deployment{}, false
+	}
+	return d, true
+}
+
+func parseTailLimit(raw string) (int, error) {
+	if raw == "" {
+		return defaultLogTail, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > maxLogTail {
+		return 0, errors.New("tail must be an integer between 1 and 500")
+	}
+	return limit, nil
+}
+
+func appendLogLines(entries []logEntry, stage, stream, text string, timestamp time.Time) []logEntry {
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		line = boundedMessage(line)
+		entry := logEntry{Timestamp: timestamp.UTC(), Stage: stage, Stream: stream, Message: line}
+		// Docker --timestamps prefixes runtime lines with their original timestamp.
+		if stage == "RUNTIME" {
+			timestampText, message, found := strings.Cut(line, " ")
+			if parsed, err := time.Parse(time.RFC3339Nano, timestampText); found && err == nil {
+				entry.Timestamp = parsed.UTC()
+				entry.Message = strings.TrimSpace(message)
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func capLogBytes(entries []logEntry, max int) []logEntry {
+	used := 0
+	start := len(entries)
+	for start > 0 {
+		size := len(entries[start-1].Message) + 96
+		if used+size > max {
+			break
+		}
+		used += size
+		start--
+	}
+	return entries[start:]
+}
+
+func runtimeTimestamp(d deployments.Deployment) time.Time {
+	if d.HealthCheckedAt != nil {
+		return d.HealthCheckedAt.UTC()
+	}
+	return d.UpdatedAt.UTC()
+}
+
+func runtimeStage(d deployments.Deployment) string {
+	if d.HealthState != nil && *d.HealthState == "UNHEALTHY" {
+		return "HEALTH_CHECK"
+	}
+	return "RUNTIME"
+}
+
+func looksLikeDependencyFailure(message, log string) bool {
+	text := strings.ToLower(message + " " + log)
+	for _, marker := range []string{"pip._vendor", "could not find a version", "no matching distribution", "error: subprocess-exited-with-error", "dependency installation"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(message), "pip")
+}
+
+func value(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func boundedMessage(message string) string {
+	message = strings.ToValidUTF8(message, "?")
+	if len(message) <= maxLogLineSize {
+		return message
+	}
+	cut := maxLogLineSize - len(" [truncated]")
+	for cut > 0 && cut < len(message) && (message[cut]&0xc0) == 0x80 {
+		cut--
+	}
+	return message[:cut] + " [truncated]"
 }
 
 func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {

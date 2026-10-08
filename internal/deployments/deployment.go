@@ -72,7 +72,9 @@ type Deployment struct {
 	ImageName          *string    `json:"image_name"`
 	BuildLog           *string    `json:"build_log"`
 	BuildError         *string    `json:"build_error"`
+	BuildCompletedAt   *time.Time `json:"build_completed_at"`
 	StartError         *string    `json:"start_error"`
+	StartupFailedAt    *time.Time `json:"startup_failed_at"`
 }
 
 // CreateInput contains metadata accepted when creating a deployment.

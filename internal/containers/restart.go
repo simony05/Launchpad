@@ -27,7 +27,7 @@ func (m *DockerManager) LogTail(ctx context.Context, id string) (string, error) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
-	output, err := m.run(ctx, "logs", "--tail", "50", id)
+	output, err := m.run(ctx, "logs", "--timestamps", "--tail", "50", id)
 	if err != nil {
 		return "", commandError(ctx, "read container logs", output, err)
 	}

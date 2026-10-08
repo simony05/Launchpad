@@ -1,5 +1,8 @@
 # Launchpad
 
+Milestone 17: [agent-readable deployment diagnostics](docs/deployment-diagnostics.md)
+adds bounded stage-tagged logs and structured deployment errors.
+
 Milestone 16: [ephemeral prototype TTL](docs/ephemeral-ttl.md) gives deployments a
 seven-day default lifetime and retries idempotent container, image, workspace, and
 source cleanup. Set `ttl_seconds: 0` for an explicitly permanent deployment.
@@ -97,6 +100,10 @@ then `READY_TO_START`, `STARTING`, and finally `RUNNING`. Build or startup
 errors transition to `FAILED`. The response stores the deterministic image
 name `launchpad/deployment:<deployment-id>-v1`, bounded build output, and
 short build/start errors when applicable.
+
+Read bounded diagnostic output from `GET /deployments/{id}/logs` and structured
+failure records from `GET /deployments/{id}/errors`. Logs accept an optional
+`tail` query parameter (1-500, default 100).
 
 Launchpad generates a fixed Python 3.13 runtime template that installs
 `requirements.txt` and runs `uvicorn app:app` on port 8000. Agents cannot
