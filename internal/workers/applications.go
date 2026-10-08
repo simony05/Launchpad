@@ -83,6 +83,28 @@ func (a Applications) Observe(ctx context.Context, workerID string, o Observatio
 }
 
 func (a Applications) routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /internal/workers/{id}/idle/{deployment}", func(w http.ResponseWriter, r *http.Request) {
+		state := "SUSPENDING"
+		if r.URL.Query().Get("action") == "wake" {
+			state = "WAKING"
+		} else if r.URL.Query().Get("action") != "sleep" {
+			http.Error(w, "invalid action", 400)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		var allowed bool
+		err := a.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deployments d JOIN workers w ON w.id=d.worker_id WHERE d.id::text=$1 AND w.id::text=$2 AND d.version::text=$3 AND d.idle_epoch::text=$4 AND d.status::text=$5 AND w.recovery_state='ACTIVE')`, r.PathValue("deployment"), r.PathValue("id"), r.URL.Query().Get("version"), r.URL.Query().Get("epoch"), state).Scan(&allowed)
+		if err != nil {
+			http.Error(w, "lookup failed", 503)
+			return
+		}
+		if !allowed {
+			http.Error(w, "operation revoked", 409)
+			return
+		}
+		w.WriteHeader(204)
+	})
 	mux.HandleFunc("GET /internal/workers/{id}/assignments/{deployment}", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := uuid.Parse(r.PathValue("deployment")); err != nil {
 			http.Error(w, "invalid deployment id", 400)

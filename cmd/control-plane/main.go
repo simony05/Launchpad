@@ -19,6 +19,7 @@ import (
 	"github.com/simon/launchpad/internal/deployments"
 	"github.com/simon/launchpad/internal/failover"
 	"github.com/simon/launchpad/internal/httpserver"
+	"github.com/simon/launchpad/internal/idle"
 	"github.com/simon/launchpad/internal/routing"
 	"github.com/simon/launchpad/internal/scheduler"
 	"github.com/simon/launchpad/internal/worker"
@@ -67,6 +68,13 @@ func main() {
 	}
 
 	deploymentRepository := deployments.NewPostgresRepository(pool)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	idleCfg, err := config.LoadIdle()
+	if err != nil {
+		logger.Error("invalid idle configuration", "error", err)
+		os.Exit(1)
+	}
 	failoverCfg, err := config.LoadFailover(registryCfg.Timeout)
 	if err != nil {
 		logger.Error("invalid failover configuration", "error", err)
@@ -90,6 +98,58 @@ func main() {
 		return worker.NewHTTPClient(address, cfg.WorkerToken, buildTimeout+startTimeout)
 	}}
 	server := httpserver.New(cfg.Address(), logger, deploymentRepository, workerClient, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, applicationRouter, cfg.PublicBaseDomain, buildTimeout, startTimeout, placement)
+	idleDone := make(chan struct{})
+	if idleCfg.Enabled {
+		// One router owns in-flight request accounting; do not permit two owners.
+		owner, err := pool.Acquire(startupCtx)
+		if err != nil {
+			logger.Error("acquire idle owner", "error", err)
+			os.Exit(1)
+		}
+		var acquired bool
+		if err := owner.QueryRow(startupCtx, `SELECT pg_try_advisory_lock(150015)`).Scan(&acquired); err != nil || !acquired {
+			logger.Error("another scale-to-zero router owns this database", "error", err)
+			os.Exit(1)
+		}
+		service := &idle.Service{Pool: pool, Repository: deploymentRepository, Context: ctx, IdleTimeout: idleCfg.Timeout, OperationTimeout: idleCfg.WakeTimeout, HeartbeatTimeout: registryCfg.Timeout, Logger: logger, Invalidate: applicationRouter.Invalidate, Client: func(address string) (worker.IdleClient, error) {
+			return worker.NewHTTPClient(address, cfg.WorkerToken, idleCfg.WakeTimeout)
+		}}
+		applicationRouter.SetLifecycle(service)
+		server.ReadTimeout = max(server.ReadTimeout, idleCfg.WakeTimeout+15*time.Second)
+		server.WriteTimeout = max(server.WriteTimeout, idleCfg.WakeTimeout+30*time.Second)
+		go func() {
+			defer close(idleDone)
+			defer owner.Release()
+			defer func() {
+				cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = owner.Conn().Close(cleanup)
+			}()
+			done := make(chan struct{})
+			go func() { defer close(done); service.Run(ctx, idleCfg.Interval) }()
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					<-done
+					return
+				case <-ticker.C:
+					ping, cancel := context.WithTimeout(ctx, 5*time.Second)
+					err := owner.Ping(ping)
+					cancel()
+					if err != nil {
+						logger.Error("lost idle router ownership", "error", err)
+						stop()
+						<-done
+						return
+					}
+				}
+			}
+		}()
+	} else {
+		close(idleDone)
+	}
 
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Address())
@@ -99,8 +159,6 @@ func main() {
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	failoverDone := make(chan struct{})
 	if failoverCfg.Enabled {
 		awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(failoverCfg.Region))
@@ -130,6 +188,7 @@ func main() {
 	<-ctx.Done()
 	<-monitorDone
 	<-failoverDone
+	<-idleDone
 
 	logger.Info("control plane shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)

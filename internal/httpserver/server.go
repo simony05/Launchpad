@@ -276,8 +276,13 @@ func (h deploymentHandler) delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "get deployment")
 		return
 	}
-	if deployment.Status == deployments.StatusBuilding || deployment.Status == deployments.StatusStarting || deployment.Status == deployments.StatusReadyToStart || deployment.Status == deployments.StatusRecovering {
+	if deployment.Status == deployments.StatusBuilding || deployment.Status == deployments.StatusStarting || deployment.Status == deployments.StatusReadyToStart || deployment.Status == deployments.StatusRecovering || deployment.Status == deployments.StatusSuspending || deployment.Status == deployments.StatusWaking {
 		writeError(w, http.StatusConflict, "deployment is busy")
+		return
+	}
+	deployment, err = h.repository.ClaimStop(r.Context(), deployment.ID, deployment.Version)
+	if err != nil {
+		writeRepositoryError(w, err, "claim deployment stop")
 		return
 	}
 	if deployment.ContainerID != nil {
@@ -331,7 +336,7 @@ func (h deploymentHandler) writeDeployment(w http.ResponseWriter, status int, de
 }
 
 func (h deploymentHandler) decorateDeployment(deployment *deployments.Deployment) {
-	if deployment.Status != deployments.StatusRunning || deployment.PublicIdentifier == nil {
+	if (deployment.Status != deployments.StatusRunning && deployment.Status != deployments.StatusSleeping && deployment.Status != deployments.StatusWaking && deployment.Status != deployments.StatusSuspending) || deployment.PublicIdentifier == nil {
 		return
 	}
 	publicURL := "https://" + *deployment.PublicIdentifier + "." + h.publicBaseDomain

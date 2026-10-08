@@ -22,4 +22,5 @@ type Repository interface {
 	CompleteStart(context.Context, string, string, int, int) (Deployment, error)
 	FailStart(context.Context, string, string) (Deployment, error)
 	MarkStopped(context.Context, string, int) (Deployment, error)
+	ClaimStop(context.Context, string, int) (Deployment, error)
 }

@@ -14,7 +14,7 @@ import (
 const deploymentColumns = `
 	id::text, name, status::text, runtime, version, created_at, updated_at,
 	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error, worker_id::text, worker_address,
-	health_path, health_state, health_checked_at, restart_attempts, next_restart_at, last_exit_code, oom_killed, runtime_error, last_failure, runtime_logs,failover_attempts,recovery_error`
+	health_path, health_state, health_checked_at, restart_attempts, next_restart_at, last_exit_code, oom_killed, runtime_error, last_failure, runtime_logs,failover_attempts,recovery_error,last_request_at,idle_epoch,idle_error,cold_start_ms`
 
 // PostgresRepository stores deployment metadata in PostgreSQL.
 type PostgresRepository struct {
@@ -142,7 +142,7 @@ func (r *PostgresRepository) MarkStarting(ctx context.Context, id string) (Deplo
 func (r *PostgresRepository) CompleteStart(ctx context.Context, id, containerID string, internalPort, hostPort int) (Deployment, error) {
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
-		SET status = $2, container_id = $3, internal_port = $4, host_port = $5, start_error = NULL
+		SET status = $2, container_id = $3, internal_port = $4, host_port = $5, start_error = NULL,last_request_at=clock_timestamp()
 		WHERE id = $1 AND status = $6
 		RETURNING `+deploymentColumns, id, StatusRunning, containerID, internalPort, hostPort, StatusStarting)
 	return r.scanUpdatedDeployment(row, "complete deployment start")
@@ -161,9 +161,14 @@ func (r *PostgresRepository) MarkStopped(ctx context.Context, id string, version
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
 		SET status = $2, container_id = NULL, internal_port = NULL, host_port = NULL
-		WHERE id = $1 AND status NOT IN ($3, $4,'RECOVERING') AND version=$5
+		WHERE id = $1 AND status NOT IN ($3, $4,'RECOVERING','SUSPENDING','WAKING') AND version=$5
 		RETURNING `+deploymentColumns, id, StatusStopped, StatusBuilding, StatusStarting, version)
 	return r.scanUpdatedDeployment(row, "mark deployment stopped")
+}
+
+// ClaimStop revokes idle/start operations before contacting the worker.
+func (r *PostgresRepository) ClaimStop(ctx context.Context, id string, version int) (Deployment, error) {
+	return r.scanUpdatedDeployment(r.pool.QueryRow(ctx, `UPDATE deployments SET status='STOPPING' WHERE id=$1 AND version=$2 AND status NOT IN ('BUILDING','READY_TO_START','STARTING','RECOVERING','SUSPENDING','WAKING') RETURNING `+deploymentColumns, id, version), "claim deployment stop")
 }
 
 func (r *PostgresRepository) scanUpdatedDeployment(row pgx.Row, operation string) (Deployment, error) {
@@ -207,6 +212,7 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		&deployment.HealthPath, &deployment.HealthState, &deployment.HealthCheckedAt, &deployment.RestartAttempts, &deployment.NextRestartAt, &deployment.LastExitCode, &deployment.OOMKilled, &deployment.RuntimeError, &deployment.LastFailure,
 		&deployment.RuntimeLogs,
 		&deployment.FailoverAttempts, &deployment.RecoveryError,
+		&deployment.LastRequestAt, &deployment.IdleEpoch, &deployment.IdleError, &deployment.ColdStartMS,
 	)
 	if err != nil {
 		return Deployment{}, err

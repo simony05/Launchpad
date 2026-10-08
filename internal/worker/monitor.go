@@ -64,6 +64,9 @@ func (m ApplicationMonitor) Scan(ctx context.Context) error {
 	return nil
 }
 func (m ApplicationMonitor) check(ctx context.Context, d deployments.Deployment) error {
+	lock := lifecycleLock(d.ID)
+	lock.Lock()
+	defer lock.Unlock()
 	if d.ContainerID == nil {
 		return nil
 	}

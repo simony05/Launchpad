@@ -18,10 +18,18 @@ const (
 	StatusStopped      Status = "STOPPED"
 	StatusReadyToStart Status = "READY_TO_START"
 	StatusRecovering   Status = "RECOVERING"
+	StatusSuspending   Status = "SUSPENDING"
+	StatusSleeping     Status = "SLEEPING"
+	StatusWaking       Status = "WAKING"
+	StatusStopping     Status = "STOPPING"
 )
 
 // Deployment is Launchpad's metadata record for an application deployment.
 type Deployment struct {
+	LastRequestAt    time.Time  `json:"last_request_at"`
+	IdleEpoch        int        `json:"-"`
+	IdleError        *string    `json:"idle_error"`
+	ColdStartMS      *int64     `json:"cold_start_ms"`
 	FailoverAttempts int        `json:"failover_attempts"`
 	RecoveryError    *string    `json:"recovery_error"`
 	RuntimeLogs      string     `json:"runtime_logs"`

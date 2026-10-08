@@ -1,5 +1,9 @@
 # Launchpad
 
+Milestone 15: [scale idle prototypes to zero](docs/scale-to-zero.md) adds retained
+container sleep/wake, request activity tracking, readiness waits, and cold-start
+latency logging. Enable it after upgrading both workers; it defaults to off.
+
 Milestone 14: [worker failure recovery](docs/worker-failover.md) adds durable source,
 grace periods, confirmed EC2 fencing, and versioned rescheduling. Automatic worker
 recovery is opt-in and requires worker identities/tags and scoped EC2 permissions.

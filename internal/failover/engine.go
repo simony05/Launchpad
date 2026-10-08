@@ -138,7 +138,7 @@ func (e *Engine) prepare(ctx context.Context) (Job, error) {
 	var workerState string
 	err = tx.QueryRow(ctx, `SELECT d.id::text,d.worker_id::text,d.worker_address,d.version,COALESCE(d.public_identifier,''),d.source_files,d.reserved_cpu,d.reserved_memory,d.failover_attempts,d.recovery_retries,w.recovery_state
  FROM deployments d JOIN workers w ON w.id=d.worker_id
- WHERE (w.recovery_state='FENCED' AND d.status IN ('RUNNING','BUILDING','READY_TO_START','STARTING','RECOVERING'))
+ WHERE (w.recovery_state='FENCED' AND d.status IN ('RUNNING','BUILDING','READY_TO_START','STARTING','RECOVERING','WAKING'))
  OR (d.status='RECOVERING' AND w.recovery_state='ACTIVE' AND w.status='HEALTHY' AND w.last_heartbeat>=clock_timestamp()-($1 * interval '1 second'))
  ORDER BY d.updated_at,d.id LIMIT 1 FOR UPDATE OF d`, e.HeartbeatTimeout.Seconds()).Scan(&j.ID, &j.WorkerID, &j.Address, &j.Version, &j.PublicIdentifier, &source, &cpu, &memory, &attempts, &j.Retries, &workerState)
 	if err != nil {
@@ -247,7 +247,7 @@ func (e *Engine) finish(ctx context.Context, j Job, r worker.StartResult) error 
 	if r.Container == nil || !regexp.MustCompile(`^[a-f0-9]{12,64}$`).MatchString(r.Container.ID) || r.Container.InternalPort != 8000 || r.Container.HostPort < 1 || r.Container.HostPort > 65535 {
 		return e.failure(ctx, j, "worker returned invalid recovery location", true)
 	}
-	_, err := e.Pool.Exec(ctx, `UPDATE deployments SET status='RUNNING',container_id=$3,host_port=$4,internal_port=$5,image_name=$6,build_log=$7,recovery_error=NULL,health_state=NULL,health_checked_at=NULL,runtime_error=NULL WHERE id=$1 AND version=$2 AND worker_id=$8 AND status='RECOVERING'`, j.ID, j.Version, r.Container.ID, r.Container.HostPort, r.Container.InternalPort, r.ImageName, r.BuildLog, j.WorkerID)
+	_, err := e.Pool.Exec(ctx, `UPDATE deployments SET status='RUNNING',container_id=$3,host_port=$4,internal_port=$5,image_name=$6,build_log=$7,recovery_error=NULL,health_state=NULL,health_checked_at=NULL,runtime_error=NULL,last_request_at=clock_timestamp() WHERE id=$1 AND version=$2 AND worker_id=$8 AND status='RECOVERING'`, j.ID, j.Version, r.Container.ID, r.Container.HostPort, r.Container.InternalPort, r.ImageName, r.BuildLog, j.WorkerID)
 	e.Invalidate(j.PublicIdentifier)
 	return err
 }

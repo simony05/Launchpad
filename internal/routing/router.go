@@ -25,6 +25,11 @@ type Resolver interface {
 	GetByPublicIdentifier(context.Context, string) (deployments.Deployment, error)
 }
 
+type Lifecycle interface {
+	Acquire(context.Context, string) (func(), error)
+	AllowsHost(context.Context, string) bool
+}
+
 // ApplicationRouter is an HTTP router whose cache can be invalidated when a
 // deployment stops.
 type ApplicationRouter interface {
@@ -45,6 +50,7 @@ type cacheEntry struct {
 // Router resolves a public application identifier and proxies it to the
 // deployment's published Docker host port.
 type Router struct {
+	lifecycle        Lifecycle
 	resolver         Resolver
 	upstreamHost     string
 	publicBaseDomain string
@@ -56,6 +62,9 @@ type Router struct {
 	lookups   [64]sync.Mutex
 	transport *http.Transport
 }
+
+// SetLifecycle must be called before the server accepts requests.
+func (r *Router) SetLifecycle(l Lifecycle) { r.lifecycle = l }
 
 func New(resolver Resolver, upstreamHost, publicBaseDomain string, cacheTTL time.Duration) *Router {
 	return &Router{
@@ -97,6 +106,9 @@ func (r *Router) AllowsHost(ctx context.Context, host string) bool {
 	if !ok {
 		return false
 	}
+	if r.lifecycle != nil {
+		return r.lifecycle.AllowsHost(ctx, publicIdentifier)
+	}
 	_, err := r.resolve(ctx, publicIdentifier)
 	return err == nil
 }
@@ -107,6 +119,19 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 		return
 	}
 
+	if r.lifecycle != nil {
+		release, err := r.lifecycle.Acquire(request.Context(), publicIdentifier)
+		if err != nil {
+			code := http.StatusServiceUnavailable
+			if errors.Is(err, deployments.ErrNotFound) {
+				code = http.StatusNotFound
+			}
+			w.Header().Set("Retry-After", "2")
+			writeError(w, code, "application is unavailable")
+			return
+		}
+		defer release()
+	}
 	location, err := r.resolve(request.Context(), publicIdentifier)
 	if errors.Is(err, deployments.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "application not found")

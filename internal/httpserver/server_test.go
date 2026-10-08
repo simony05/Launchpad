@@ -273,6 +273,20 @@ func (r *memoryRepository) FailStart(_ context.Context, id, startError string) (
 	return deployments.Deployment{}, deployments.ErrInvalidState
 }
 
+func (r *memoryRepository) ClaimStop(_ context.Context, id string, version int) (deployments.Deployment, error) {
+	for i, d := range r.items {
+		if d.ID == id && d.Version == version {
+			switch d.Status {
+			case deployments.StatusBuilding, deployments.StatusStarting, deployments.StatusReadyToStart, deployments.StatusRecovering, deployments.StatusSuspending, deployments.StatusWaking:
+				return deployments.Deployment{}, deployments.ErrInvalidState
+			}
+			d.Status = deployments.StatusStopping
+			r.items[i] = d
+			return d, nil
+		}
+	}
+	return deployments.Deployment{}, deployments.ErrInvalidState
+}
 func (r *memoryRepository) MarkStopped(_ context.Context, id string, version int) (deployments.Deployment, error) {
 	for index, deployment := range r.items {
 		if deployment.ID == id && deployment.Status != deployments.StatusBuilding && deployment.Status != deployments.StatusStarting {
