@@ -17,6 +17,7 @@ import (
 	"github.com/simon/launchpad/internal/containers"
 	"github.com/simon/launchpad/internal/database"
 	"github.com/simon/launchpad/internal/deployments"
+	"github.com/simon/launchpad/internal/expiration"
 	"github.com/simon/launchpad/internal/failover"
 	"github.com/simon/launchpad/internal/httpserver"
 	"github.com/simon/launchpad/internal/idle"
@@ -75,6 +76,11 @@ func main() {
 		logger.Error("invalid idle configuration", "error", err)
 		os.Exit(1)
 	}
+	ttlCfg, err := config.LoadTTL()
+	if err != nil {
+		logger.Error("invalid TTL configuration", "error", err)
+		os.Exit(1)
+	}
 	failoverCfg, err := config.LoadFailover(registryCfg.Timeout)
 	if err != nil {
 		logger.Error("invalid failover configuration", "error", err)
@@ -94,10 +100,13 @@ func main() {
 		return worker.NewHTTPClient(address, cfg.WorkerToken, 3*time.Second)
 	}}
 	applicationRouter := routing.New(verifiedResolver, cfg.RouterUpstreamHost, cfg.PublicBaseDomain, time.Duration(cfg.RouterCacheTTLSeconds)*time.Second)
-	placement := httpserver.Placement{Scheduler: scheduler.Postgres{Pool: pool, HeartbeatTimeout: registryCfg.Timeout}, Client: func(address string) (worker.Client, error) {
+	placement := httpserver.Placement{Scheduler: scheduler.Postgres{Pool: pool, HeartbeatTimeout: registryCfg.Timeout}, DefaultTTLSeconds: ttlCfg.DefaultSeconds, Client: func(address string) (worker.Client, error) {
 		return worker.NewHTTPClient(address, cfg.WorkerToken, buildTimeout+startTimeout)
 	}}
 	server := httpserver.New(cfg.Address(), logger, deploymentRepository, workerClient, containers.Limits{CPUs: cfg.AppCPUs, Memory: cfg.AppMemory}, applicationRouter, cfg.PublicBaseDomain, buildTimeout, startTimeout, placement)
+	expirationDone := make(chan struct{})
+	expirer := &expiration.Service{Repository: deploymentRepository, Client: placement.Client, Logger: logger, Invalidate: applicationRouter.Invalidate, Pool: pool}
+	go func() { defer close(expirationDone); expirer.Run(ctx, ttlCfg.CheckInterval) }()
 	idleDone := make(chan struct{})
 	if idleCfg.Enabled {
 		// One router owns in-flight request accounting; do not permit two owners.
@@ -189,6 +198,7 @@ func main() {
 	<-monitorDone
 	<-failoverDone
 	<-idleDone
+	<-expirationDone
 
 	logger.Info("control plane shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)

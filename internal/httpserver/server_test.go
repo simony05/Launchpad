@@ -277,7 +277,7 @@ func (r *memoryRepository) ClaimStop(_ context.Context, id string, version int) 
 	for i, d := range r.items {
 		if d.ID == id && d.Version == version {
 			switch d.Status {
-			case deployments.StatusBuilding, deployments.StatusStarting, deployments.StatusReadyToStart, deployments.StatusRecovering, deployments.StatusSuspending, deployments.StatusWaking:
+			case deployments.StatusBuilding, deployments.StatusStarting, deployments.StatusReadyToStart, deployments.StatusRecovering, deployments.StatusSuspending, deployments.StatusWaking, deployments.StatusExpiring, deployments.StatusExpired:
 				return deployments.Deployment{}, deployments.ErrInvalidState
 			}
 			d.Status = deployments.StatusStopping
@@ -299,6 +299,35 @@ func (r *memoryRepository) MarkStopped(_ context.Context, id string, version int
 		}
 	}
 	return deployments.Deployment{}, deployments.ErrInvalidState
+}
+
+func (r *memoryRepository) ClaimExpiration(_ context.Context, _ int) ([]deployments.Deployment, error) {
+	return nil, nil
+}
+
+func (r *memoryRepository) MarkExpired(_ context.Context, id string, version int) error {
+	for i, deployment := range r.items {
+		if deployment.ID == id && deployment.Version == version && deployment.Status == deployments.StatusExpiring {
+			deployment.Status = deployments.StatusExpired
+			deployment.ContainerID = nil
+			deployment.InternalPort = nil
+			deployment.HostPort = nil
+			r.items[i] = deployment
+			return nil
+		}
+	}
+	return deployments.ErrInvalidState
+}
+
+func (r *memoryRepository) RecordExpirationError(_ context.Context, id string, version int, message string, _ time.Duration) error {
+	for i, deployment := range r.items {
+		if deployment.ID == id && deployment.Version == version && deployment.Status == deployments.StatusExpiring {
+			deployment.ExpirationError = &message
+			r.items[i] = deployment
+			return nil
+		}
+	}
+	return deployments.ErrInvalidState
 }
 
 type memorySourceStore struct {

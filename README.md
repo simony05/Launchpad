@@ -1,5 +1,9 @@
 # Launchpad
 
+Milestone 16: [ephemeral prototype TTL](docs/ephemeral-ttl.md) gives deployments a
+seven-day default lifetime and retries idempotent container, image, workspace, and
+source cleanup. Set `ttl_seconds: 0` for an explicitly permanent deployment.
+
 Milestone 15: [scale idle prototypes to zero](docs/scale-to-zero.md) adds retained
 container sleep/wake, request activity tracking, readiness waits, and cold-start
 latency logging. Enable it after upgrading both workers; it defaults to off.
@@ -22,11 +26,11 @@ below are historical; the control plane must not mount the Docker socket.
 
 Launchpad is an agent-native deployment runtime for AI-generated prototypes.
 
-This repository contains the Launchpad control plane. It accepts a small,
-validated Python/FastAPI source bundle, builds a Docker image from a
-Launchpad-owned runtime template, and starts the resulting container. It does
-not schedule work or communicate with workers yet. Applications are available
-through a single-host reverse proxy and HTTPS edge.
+This repository contains the Launchpad control plane and worker. It accepts a
+small, validated Python/FastAPI source bundle, builds a Docker image from a
+Launchpad-owned runtime template, schedules the application onto a worker, and
+routes its public URL through the control plane. TTL expiration and idle sleep
+can stop applications while retaining their deployment metadata.
 
 ## Project structure
 

@@ -38,7 +38,7 @@ type Service struct {
 // Certificate authorization must not generate traffic or cold-start an app.
 func (s *Service) AllowsHost(ctx context.Context, id string) bool {
 	d, err := s.Repository.GetByPublicIdentifier(ctx, id)
-	return err == nil && (d.Status == deployments.StatusRunning || d.Status == deployments.StatusSleeping || d.Status == deployments.StatusWaking || d.Status == deployments.StatusSuspending)
+	return err == nil && !d.IsExpired(time.Now()) && (d.Status == deployments.StatusRunning || d.Status == deployments.StatusSleeping || d.Status == deployments.StatusWaking || d.Status == deployments.StatusSuspending)
 }
 func (s *Service) slot(id string) int {
 	h := fnv.New32a()
@@ -74,7 +74,7 @@ func (s *Service) Acquire(ctx context.Context, id string) (func(), error) {
 	// Warm requests need only an activity write, not another metadata/location read.
 	var runningID string
 	var runningVersion int
-	err = s.Pool.QueryRow(ctx, `UPDATE deployments SET last_request_at=clock_timestamp() WHERE public_identifier=$1 AND status='RUNNING' RETURNING id::text,version`, id).Scan(&runningID, &runningVersion)
+	err = s.Pool.QueryRow(ctx, `UPDATE deployments SET last_request_at=clock_timestamp() WHERE public_identifier=$1 AND status='RUNNING' AND (expires_at IS NULL OR expires_at>clock_timestamp()) RETURNING id::text,version`, id).Scan(&runningID, &runningVersion)
 	if err == nil {
 		return s.retain(i, id, runningID, runningVersion), nil
 	}
@@ -84,6 +84,9 @@ func (s *Service) Acquire(ctx context.Context, id string) (func(), error) {
 	d, err := s.Repository.GetByPublicIdentifier(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if d.IsExpired(time.Now()) || d.Status == deployments.StatusExpired {
+		return nil, deployments.ErrExpired
 	}
 	if d.Status == deployments.StatusSuspending || d.Status == deployments.StatusSleeping || d.Status == deployments.StatusWaking {
 		op, cancel := context.WithTimeout(s.Context, s.OperationTimeout)

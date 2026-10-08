@@ -33,8 +33,12 @@ func New(address string, logger *slog.Logger, deploymentRepository deployments.R
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	deploymentHandler := deploymentHandler{repository: deploymentRepository, workerClient: workerClient, containerLimits: containerLimits, applicationRouter: applicationRouter, publicBaseDomain: publicBaseDomain}
+	deploymentHandler.defaultTTLSeconds = 7 * 24 * 60 * 60
 	if len(placement) > 0 {
 		deploymentHandler.placement = &placement[0]
+		if placement[0].DefaultTTLSeconds > 0 {
+			deploymentHandler.defaultTTLSeconds = placement[0].DefaultTTLSeconds
+		}
 	}
 	mux.HandleFunc("POST /deployments", deploymentHandler.create)
 	mux.HandleFunc("GET /deployments", deploymentHandler.list)
@@ -61,6 +65,7 @@ func health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type deploymentHandler struct {
+	defaultTTLSeconds int64
 	placement         *Placement
 	repository        deployments.Repository
 	workerClient      worker.Client
@@ -72,8 +77,9 @@ type deploymentHandler struct {
 // Placement supplies scheduling and per-worker clients. The legacy client is
 // retained only for deployments created before worker assignments existed.
 type Placement struct {
-	Scheduler scheduler.Scheduler
-	Client    func(string) (worker.Client, error)
+	Scheduler         scheduler.Scheduler
+	Client            func(string) (worker.Client, error)
+	DefaultTTLSeconds int64
 }
 
 func (h deploymentHandler) clientFor(d deployments.Deployment) (worker.Client, error) {
@@ -98,6 +104,7 @@ func (h deploymentHandler) release(id string, version int) {
 }
 
 type createDeploymentRequest struct {
+	TTLSeconds *int64          `json:"ttl_seconds"`
 	HealthPath string          `json:"health_path"`
 	Name       string          `json:"name"`
 	Runtime    string          `json:"runtime"`
@@ -112,6 +119,7 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deployment, err := h.repository.Create(r.Context(), deployments.CreateInput{
+		TTLSeconds: effectiveTTL(request.TTLSeconds, h.defaultTTLSeconds),
 		Files:      request.Files,
 		HealthPath: request.HealthPath,
 		Name:       request.Name,
@@ -228,6 +236,13 @@ func (h deploymentHandler) create(w http.ResponseWriter, r *http.Request) {
 	h.writeDeployment(w, http.StatusCreated, deployment)
 }
 
+func effectiveTTL(requested *int64, defaultValue int64) int64 {
+	if requested == nil {
+		return defaultValue
+	}
+	return *requested
+}
+
 func (h deploymentHandler) failBuild(id, buildLog, buildError string) (deployments.Deployment, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
@@ -336,6 +351,9 @@ func (h deploymentHandler) writeDeployment(w http.ResponseWriter, status int, de
 }
 
 func (h deploymentHandler) decorateDeployment(deployment *deployments.Deployment) {
+	if deployment.IsExpired(time.Now()) || deployment.Status == deployments.StatusExpired || deployment.Status == deployments.StatusExpiring {
+		return
+	}
 	if (deployment.Status != deployments.StatusRunning && deployment.Status != deployments.StatusSleeping && deployment.Status != deployments.StatusWaking && deployment.Status != deployments.StatusSuspending) || deployment.PublicIdentifier == nil {
 		return
 	}
@@ -368,6 +386,9 @@ func decodeCreateDeploymentRequest(w http.ResponseWriter, r *http.Request) (crea
 	}
 	if err := deployments.ValidateHealthPath(request.HealthPath); err != nil {
 		return createDeploymentRequest{}, err
+	}
+	if request.TTLSeconds != nil && (*request.TTLSeconds < 0 || *request.TTLSeconds > 31536000) {
+		return createDeploymentRequest{}, errors.New("ttl_seconds must be 0 (no expiration) or between 1 and 31536000")
 	}
 
 	return request, nil

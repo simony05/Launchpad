@@ -42,7 +42,7 @@ func main() {
 		os.Exit(1)
 	}
 	server := worker.NewServer(cfg.Address(), cfg.WorkerToken, logger, workspace.NewLocalStore(cfg.WorkspaceRoot), build.NewDockerBuilder(cfg.WorkspaceRoot, time.Duration(cfg.BuildTimeoutSeconds)*time.Second), containers.NewDockerManager(time.Duration(cfg.StartTimeoutSeconds)*time.Second, cfg.AppBindIP), worker.AssignmentGuard(heartbeatCfg.ControlPlaneURL, heartbeatCfg.ID, cfg.WorkerToken))
-	worker.EnableIdle(server, cfg.WorkerToken, heartbeatCfg.ControlPlaneURL, heartbeatCfg.ID, containers.NewDockerManager(time.Duration(cfg.StartTimeoutSeconds)*time.Second, cfg.AppBindIP))
+	worker.EnableIdle(server, cfg.WorkerToken, heartbeatCfg.ControlPlaneURL, heartbeatCfg.ID, containers.NewDockerManager(time.Duration(cfg.StartTimeoutSeconds)*time.Second, cfg.AppBindIP), workspace.NewLocalStore(cfg.WorkspaceRoot))
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("worker stopped unexpectedly", "error", err)

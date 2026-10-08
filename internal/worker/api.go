@@ -49,3 +49,7 @@ type Client interface {
 	Status(context.Context, string, int) (Status, error)
 	Resources(context.Context) (Resources, error)
 }
+
+type CleanupClient interface {
+	Cleanup(context.Context, string, int) error
+}

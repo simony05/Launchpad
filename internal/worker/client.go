@@ -60,6 +60,10 @@ func (c *HTTPClient) Resources(ctx context.Context) (Resources, error) {
 	return resources, nil
 }
 
+func (c *HTTPClient) Cleanup(ctx context.Context, id string, version int) error {
+	return c.doJSON(ctx, http.MethodPost, "/internal/deployments/cleanup", map[string]any{"deployment_id": id, "version": version}, nil)
+}
+
 func (c *HTTPClient) doJSON(ctx context.Context, method, endpoint string, input, output any) error {
 	var body bytes.Buffer
 	if input != nil {

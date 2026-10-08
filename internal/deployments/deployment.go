@@ -1,10 +1,17 @@
 package deployments
 
 import (
+	"errors"
 	"time"
 
 	"github.com/simon/launchpad/internal/workspace"
 )
+
+var ErrExpired = errors.New("deployment expired")
+
+func (d Deployment) IsExpired(now time.Time) bool {
+	return d.ExpiresAt != nil && !now.Before(*d.ExpiresAt)
+}
 
 // Status describes a deployment's lifecycle state.
 type Status string
@@ -22,49 +29,56 @@ const (
 	StatusSleeping     Status = "SLEEPING"
 	StatusWaking       Status = "WAKING"
 	StatusStopping     Status = "STOPPING"
+	StatusExpiring     Status = "EXPIRING"
+	StatusExpired      Status = "EXPIRED"
 )
 
 // Deployment is Launchpad's metadata record for an application deployment.
 type Deployment struct {
-	LastRequestAt    time.Time  `json:"last_request_at"`
-	IdleEpoch        int        `json:"-"`
-	IdleError        *string    `json:"idle_error"`
-	ColdStartMS      *int64     `json:"cold_start_ms"`
-	FailoverAttempts int        `json:"failover_attempts"`
-	RecoveryError    *string    `json:"recovery_error"`
-	RuntimeLogs      string     `json:"runtime_logs"`
-	HealthPath       string     `json:"health_path"`
-	HealthState      *string    `json:"health_state"`
-	HealthCheckedAt  *time.Time `json:"health_checked_at"`
-	RestartAttempts  int        `json:"restart_attempts"`
-	NextRestartAt    *time.Time `json:"next_restart_at"`
-	LastExitCode     *int       `json:"last_exit_code"`
-	OOMKilled        bool       `json:"oom_killed"`
-	RuntimeError     *string    `json:"runtime_error"`
-	LastFailure      *string    `json:"last_failure"`
-	WorkerID         *string    `json:"worker_id"`
-	WorkerAddress    *string    `json:"worker_address"`
-	ID               string     `json:"id"`
-	Name             string     `json:"name"`
-	Status           Status     `json:"status"`
-	Runtime          string     `json:"runtime"`
-	Version          int        `json:"version"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	ContainerID      *string    `json:"container_id"`
-	InternalPort     *int       `json:"internal_port"`
-	HostPort         *int       `json:"host_port"`
-	PublicIdentifier *string    `json:"public_identifier"`
-	PublicURL        *string    `json:"public_url"`
-	ImageName        *string    `json:"image_name"`
-	BuildLog         *string    `json:"build_log"`
-	BuildError       *string    `json:"build_error"`
-	StartError       *string    `json:"start_error"`
+	LastRequestAt      time.Time  `json:"last_request_at"`
+	IdleEpoch          int        `json:"-"`
+	IdleError          *string    `json:"idle_error"`
+	ColdStartMS        *int64     `json:"cold_start_ms"`
+	TTLSeconds         int64      `json:"ttl_seconds"`
+	ExpiresAt          *time.Time `json:"expires_at"`
+	ExpirationAttempts int        `json:"expiration_attempts"`
+	ExpirationError    *string    `json:"expiration_error"`
+	FailoverAttempts   int        `json:"failover_attempts"`
+	RecoveryError      *string    `json:"recovery_error"`
+	RuntimeLogs        string     `json:"runtime_logs"`
+	HealthPath         string     `json:"health_path"`
+	HealthState        *string    `json:"health_state"`
+	HealthCheckedAt    *time.Time `json:"health_checked_at"`
+	RestartAttempts    int        `json:"restart_attempts"`
+	NextRestartAt      *time.Time `json:"next_restart_at"`
+	LastExitCode       *int       `json:"last_exit_code"`
+	OOMKilled          bool       `json:"oom_killed"`
+	RuntimeError       *string    `json:"runtime_error"`
+	LastFailure        *string    `json:"last_failure"`
+	WorkerID           *string    `json:"worker_id"`
+	WorkerAddress      *string    `json:"worker_address"`
+	ID                 string     `json:"id"`
+	Name               string     `json:"name"`
+	Status             Status     `json:"status"`
+	Runtime            string     `json:"runtime"`
+	Version            int        `json:"version"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	ContainerID        *string    `json:"container_id"`
+	InternalPort       *int       `json:"internal_port"`
+	HostPort           *int       `json:"host_port"`
+	PublicIdentifier   *string    `json:"public_identifier"`
+	PublicURL          *string    `json:"public_url"`
+	ImageName          *string    `json:"image_name"`
+	BuildLog           *string    `json:"build_log"`
+	BuildError         *string    `json:"build_error"`
+	StartError         *string    `json:"start_error"`
 }
 
 // CreateInput contains metadata accepted when creating a deployment.
 type CreateInput struct {
 	Files      workspace.Files
+	TTLSeconds int64
 	HealthPath string
 	Name       string
 	Runtime    string

@@ -74,6 +74,9 @@ func (h *handler) start(w http.ResponseWriter, request *http.Request) {
 	}
 	h.locks[stripe%64].Lock()
 	defer h.locks[stripe%64].Unlock()
+	lifecycle := lifecycleLock(input.DeploymentID)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
 	allowed := func() bool {
 		if h.guard != nil {
 			if err := h.guard(request.Context(), input.DeploymentID, input.Version); err != nil {

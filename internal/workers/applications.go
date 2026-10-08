@@ -117,13 +117,36 @@ func (a Applications) routes(mux *http.ServeMux) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		var allowed bool
-		err := a.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deployments d JOIN workers w ON w.id=d.worker_id WHERE d.id=$1 AND w.id=$2 AND d.version::text=$3 AND d.status IN ('BUILDING','READY_TO_START','STARTING','RECOVERING','RUNNING') AND w.recovery_state='ACTIVE')`, r.PathValue("deployment"), r.PathValue("id"), r.URL.Query().Get("version")).Scan(&allowed)
+		err := a.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deployments d JOIN workers w ON w.id=d.worker_id WHERE d.id=$1 AND w.id=$2 AND d.version::text=$3 AND d.status IN ('BUILDING','READY_TO_START','STARTING','RECOVERING','RUNNING') AND (d.expires_at IS NULL OR d.expires_at>clock_timestamp()) AND w.recovery_state='ACTIVE')`, r.PathValue("deployment"), r.PathValue("id"), r.URL.Query().Get("version")).Scan(&allowed)
 		if err != nil {
 			http.Error(w, "assignment lookup failed", 503)
 			return
 		}
 		if !allowed {
 			http.Error(w, "assignment revoked", 409)
+			return
+		}
+		w.WriteHeader(204)
+	})
+	mux.HandleFunc("GET /internal/workers/{id}/cleanup/{deployment}", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+			http.Error(w, "invalid worker id", 400)
+			return
+		}
+		if _, err := uuid.Parse(r.PathValue("deployment")); err != nil {
+			http.Error(w, "invalid deployment id", 400)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		var allowed bool
+		err := a.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deployments WHERE id=$1 AND worker_id=$2 AND version::text=$3 AND status='EXPIRING')`, r.PathValue("deployment"), r.PathValue("id"), r.URL.Query().Get("version")).Scan(&allowed)
+		if err != nil {
+			http.Error(w, "lookup failed", 503)
+			return
+		}
+		if !allowed {
+			http.Error(w, "cleanup authorization revoked", 409)
 			return
 		}
 		w.WriteHeader(204)

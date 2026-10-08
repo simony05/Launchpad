@@ -33,6 +33,9 @@ func (v VerifiedResolver) GetByPublicIdentifier(ctx context.Context, id string) 
 	if err != nil {
 		return d, err
 	}
+	if d.IsExpired(time.Now()) || d.Status == deployments.StatusExpired {
+		return d, deployments.ErrExpired
+	}
 	if d.Status != deployments.StatusRunning || d.ContainerID == nil {
 		return d, errors.New("deployment is not running")
 	}

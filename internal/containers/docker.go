@@ -141,6 +141,31 @@ func (m *DockerManager) Remove(ctx context.Context, containerID string) error {
 	return m.remove(removeCtx, containerID)
 }
 
+// CleanupDeployment is safe to retry after a lost worker response. Container
+// names and image tags are deterministic for deployment/version.
+func (m *DockerManager) CleanupDeployment(ctx context.Context, deploymentID string, version int) error {
+	if _, err := uuid.Parse(deploymentID); err != nil || version < 1 {
+		return errors.New("invalid deployment cleanup identity")
+	}
+	ctx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	name := fmt.Sprintf("launchpad-%s-v%d", deploymentID, version)
+	output, err := m.run(ctx, "stop", "--time", "10", name)
+	if err != nil && !strings.Contains(output, "No such container") && !strings.Contains(output, "No such object") && !strings.Contains(output, "is not running") {
+		return commandError(ctx, "stop deployment container", output, err)
+	}
+	output, err = m.run(ctx, "rm", "--force", name)
+	if err != nil && !strings.Contains(output, "No such container") && !strings.Contains(output, "No such object") {
+		return commandError(ctx, "remove deployment container", output, err)
+	}
+	image := fmt.Sprintf("launchpad/deployment:%s-v%d", deploymentID, version)
+	output, err = m.run(ctx, "image", "rm", image)
+	if err != nil && !strings.Contains(output, "No such image") && !strings.Contains(output, "not found") {
+		return commandError(ctx, "remove deployment image", output, err)
+	}
+	return nil
+}
+
 func (m *DockerManager) Status(ctx context.Context, deploymentID string, version int) (Status, error) {
 	if _, err := uuid.Parse(deploymentID); err != nil || version < 1 {
 		return Status{}, errors.New("invalid deployment status configuration")

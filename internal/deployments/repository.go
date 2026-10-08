@@ -3,6 +3,7 @@ package deployments
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var ErrNotFound = errors.New("deployment not found")
@@ -23,4 +24,7 @@ type Repository interface {
 	FailStart(context.Context, string, string) (Deployment, error)
 	MarkStopped(context.Context, string, int) (Deployment, error)
 	ClaimStop(context.Context, string, int) (Deployment, error)
+	ClaimExpiration(context.Context, int) ([]Deployment, error)
+	MarkExpired(context.Context, string, int) error
+	RecordExpirationError(context.Context, string, int, string, time.Duration) error
 }

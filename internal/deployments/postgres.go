@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -14,7 +15,7 @@ import (
 const deploymentColumns = `
 	id::text, name, status::text, runtime, version, created_at, updated_at,
 	container_id, internal_port, host_port, public_identifier, image_name, build_log, build_error, start_error, worker_id::text, worker_address,
-	health_path, health_state, health_checked_at, restart_attempts, next_restart_at, last_exit_code, oom_killed, runtime_error, last_failure, runtime_logs,failover_attempts,recovery_error,last_request_at,idle_epoch,idle_error,cold_start_ms`
+	health_path, health_state, health_checked_at, restart_attempts, next_restart_at, last_exit_code, oom_killed, runtime_error, last_failure, runtime_logs,failover_attempts,recovery_error,last_request_at,idle_epoch,idle_error,cold_start_ms,ttl_seconds,expires_at,expiration_attempts,expiration_error`
 
 // PostgresRepository stores deployment metadata in PostgreSQL.
 type PostgresRepository struct {
@@ -35,9 +36,9 @@ func (r *PostgresRepository) Create(ctx context.Context, input CreateInput) (Dep
 		}
 	}
 	row := r.pool.QueryRow(ctx, `
-		INSERT INTO deployments (name, status, runtime, public_identifier,health_path,source_files)
-		VALUES ($1, $2, $3, replace(gen_random_uuid()::text, '-', ''),$4,$5)
-		RETURNING `+deploymentColumns, input.Name, StatusPending, input.Runtime, input.HealthPath, source)
+		INSERT INTO deployments (name, status, runtime, public_identifier,health_path,source_files,ttl_seconds,expires_at)
+		VALUES ($1, $2, $3, replace(gen_random_uuid()::text, '-', ''),$4,$5,$6,CASE WHEN $6=0 THEN NULL ELSE clock_timestamp()+($6 * interval '1 second') END)
+		RETURNING `+deploymentColumns, input.Name, StatusPending, input.Runtime, input.HealthPath, source, input.TTLSeconds)
 
 	deployment, err := scanDeployment(row)
 	if err != nil {
@@ -161,14 +162,65 @@ func (r *PostgresRepository) MarkStopped(ctx context.Context, id string, version
 	row := r.pool.QueryRow(ctx, `
 		UPDATE deployments
 		SET status = $2, container_id = NULL, internal_port = NULL, host_port = NULL
-		WHERE id = $1 AND status NOT IN ($3, $4,'RECOVERING','SUSPENDING','WAKING') AND version=$5
+		WHERE id = $1 AND status NOT IN ($3, $4,'RECOVERING','SUSPENDING','WAKING','EXPIRING','EXPIRED') AND version=$5
 		RETURNING `+deploymentColumns, id, StatusStopped, StatusBuilding, StatusStarting, version)
 	return r.scanUpdatedDeployment(row, "mark deployment stopped")
 }
 
 // ClaimStop revokes idle/start operations before contacting the worker.
 func (r *PostgresRepository) ClaimStop(ctx context.Context, id string, version int) (Deployment, error) {
-	return r.scanUpdatedDeployment(r.pool.QueryRow(ctx, `UPDATE deployments SET status='STOPPING' WHERE id=$1 AND version=$2 AND status NOT IN ('BUILDING','READY_TO_START','STARTING','RECOVERING','SUSPENDING','WAKING') RETURNING `+deploymentColumns, id, version), "claim deployment stop")
+	return r.scanUpdatedDeployment(r.pool.QueryRow(ctx, `UPDATE deployments SET status='STOPPING' WHERE id=$1 AND version=$2 AND status NOT IN ('BUILDING','READY_TO_START','STARTING','RECOVERING','SUSPENDING','WAKING','EXPIRING','EXPIRED') RETURNING `+deploymentColumns, id, version), "claim deployment stop")
+}
+
+// ClaimExpiration makes the URL unavailable before worker cleanup starts. The row
+// lock lets several control-plane processes safely share the expiration scan.
+func (r *PostgresRepository) ClaimExpiration(ctx context.Context, limit int) ([]Deployment, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT `+deploymentColumns+` FROM deployments WHERE (expires_at<=clock_timestamp() AND status NOT IN ('EXPIRED','EXPIRING','STOPPING')) OR (status='EXPIRING' AND (expiration_retry_at IS NULL OR expiration_retry_at<=clock_timestamp())) ORDER BY expires_at NULLS FIRST,id LIMIT $1 FOR UPDATE SKIP LOCKED`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Deployment
+	for rows.Next() {
+		d, err := scanDeployment(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for i := range out {
+		if _, err := tx.Exec(ctx, `UPDATE deployments SET status='EXPIRING',expiration_attempts=expiration_attempts+1,expiration_retry_at=clock_timestamp()+interval '30 seconds' WHERE id=$1`, out[i].ID); err != nil {
+			return nil, err
+		}
+		out[i].Status = StatusExpiring
+		out[i].ExpirationAttempts++
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+func (r *PostgresRepository) MarkExpired(ctx context.Context, id string, version int) error {
+	res, err := r.pool.Exec(ctx, `UPDATE deployments SET status='EXPIRED',container_id=NULL,internal_port=NULL,host_port=NULL,image_name=NULL,build_log=NULL,build_error=NULL,start_error=NULL,runtime_error=NULL,runtime_logs='',last_failure=NULL,recovery_error=NULL,idle_error=NULL,source_files=NULL,capacity_reserved=FALSE,expiration_error=NULL,expiration_retry_at=NULL,health_state=NULL WHERE id=$1 AND version=$2 AND status='EXPIRING'`, id, version)
+	if err == nil && res.RowsAffected() != 1 {
+		return ErrInvalidState
+	}
+	return err
+}
+func (r *PostgresRepository) RecordExpirationError(ctx context.Context, id string, version int, message string, delay time.Duration) error {
+	_, err := r.pool.Exec(ctx, `UPDATE deployments SET expiration_error=$3,expiration_retry_at=clock_timestamp()+($4 * interval '1 second') WHERE id=$1 AND version=$2 AND status='EXPIRING'`, id, version, message, delay.Seconds())
+	return err
 }
 
 func (r *PostgresRepository) scanUpdatedDeployment(row pgx.Row, operation string) (Deployment, error) {
@@ -213,6 +265,7 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		&deployment.RuntimeLogs,
 		&deployment.FailoverAttempts, &deployment.RecoveryError,
 		&deployment.LastRequestAt, &deployment.IdleEpoch, &deployment.IdleError, &deployment.ColdStartMS,
+		&deployment.TTLSeconds, &deployment.ExpiresAt, &deployment.ExpirationAttempts, &deployment.ExpirationError,
 	)
 	if err != nil {
 		return Deployment{}, err

@@ -31,6 +31,21 @@ type LocalStore struct {
 	root string
 }
 
+// Remove deletes only the UUID-scoped source workspace. It is safe when already absent.
+func (s *LocalStore) Remove(ctx context.Context, deploymentID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := Path(s.root, deploymentID)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("remove deployment workspace: %w", err)
+	}
+	return nil
+}
+
 func NewLocalStore(root string) *LocalStore {
 	return &LocalStore{root: root}
 }

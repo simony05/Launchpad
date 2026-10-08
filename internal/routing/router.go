@@ -41,10 +41,11 @@ type ApplicationRouter interface {
 }
 
 type cacheEntry struct {
-	err      error
-	host     string
-	hostPort int
-	expires  time.Time
+	err                 error
+	host                string
+	hostPort            int
+	expires             time.Time
+	deploymentExpiresAt *time.Time
 }
 
 // Router resolves a public application identifier and proxies it to the
@@ -125,6 +126,8 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 			code := http.StatusServiceUnavailable
 			if errors.Is(err, deployments.ErrNotFound) {
 				code = http.StatusNotFound
+			} else if errors.Is(err, deployments.ErrExpired) {
+				code = http.StatusGone
 			}
 			w.Header().Set("Retry-After", "2")
 			writeError(w, code, "application is unavailable")
@@ -135,6 +138,10 @@ func (r *Router) proxy(w http.ResponseWriter, request *http.Request, publicIdent
 	location, err := r.resolve(request.Context(), publicIdentifier)
 	if errors.Is(err, deployments.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "application not found")
+		return
+	}
+	if errors.Is(err, deployments.ErrExpired) {
+		writeError(w, http.StatusGone, "application has expired")
 		return
 	}
 	if err != nil {
@@ -200,6 +207,9 @@ func (r *Router) resolve(ctx context.Context, publicIdentifier string) (cacheEnt
 		ttl = time.Second
 	}
 	entry.expires = r.now().Add(ttl)
+	if err == nil && entry.deploymentExpiresAt != nil && entry.deploymentExpiresAt.Before(entry.expires) {
+		entry.expires = *entry.deploymentExpiresAt
+	}
 	entry.err = err
 	r.mu.Lock()
 	if len(r.cache) >= 1024 {
@@ -223,9 +233,18 @@ func (r *Router) resolve(ctx context.Context, publicIdentifier string) (cacheEnt
 func (r *Router) load(ctx context.Context, publicIdentifier string) (cacheEntry, error) {
 	deployment, err := r.resolver.GetByPublicIdentifier(ctx, publicIdentifier)
 	if err != nil {
+		if deployment.IsExpired(r.now()) {
+			return cacheEntry{}, deployments.ErrExpired
+		}
 		return cacheEntry{}, err
 	}
+	if deployment.IsExpired(r.now()) || deployment.Status == deployments.StatusExpired {
+		return cacheEntry{}, deployments.ErrExpired
+	}
 	if deployment.Status != deployments.StatusRunning || deployment.HostPort == nil {
+		if deployment.IsExpired(r.now()) || deployment.Status == deployments.StatusExpired {
+			return cacheEntry{}, deployments.ErrExpired
+		}
 		return cacheEntry{}, errors.New("deployment is not running")
 	}
 	host := r.upstreamHost
@@ -242,7 +261,7 @@ func (r *Router) load(ctx context.Context, publicIdentifier string) (cacheEntry,
 	if *deployment.HostPort < 1 || *deployment.HostPort > 65535 {
 		return cacheEntry{}, errors.New("invalid application port")
 	}
-	return cacheEntry{host: host, hostPort: *deployment.HostPort}, nil
+	return cacheEntry{host: host, hostPort: *deployment.HostPort, deploymentExpiresAt: deployment.ExpiresAt}, nil
 }
 
 func applicationPath(request *http.Request, publicIdentifier string) (string, string) {
